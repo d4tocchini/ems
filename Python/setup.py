@@ -42,6 +42,7 @@ link_args = []
 if sys.platform == "linux" or sys.platform == "linux2":
     link_args.append("-lrt")
 elif sys.platform == "darwin":
+    # fixes "ld: library not found for -lstdc++" see https://github.com/scikit-hep/root_numpy/issues/236#issuecomment-200511415
     link_args.append("-mmacosx-version-min=10.12")
 else:
     pass
