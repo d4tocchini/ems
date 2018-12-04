@@ -40,7 +40,6 @@ all: py3 build_js help_notice test
 	help help_notice \
 	clean clean_js clean_py3 clean_py2
 
-
 help:
 	@echo "         Extended Memory Semantics  --  Build Targets"
 	@echo "==========================================================="
@@ -91,10 +90,10 @@ dist/electron/Release/ems.node:
 py: py2 py3
 
 py3:
-	(cd Python; rm -rf Python/build Python/ems.egg-info Python/dist; python3 ./setup.py build --build-temp=./ install)
+	(cd Python; sudo rm -rf Python/build Python/ems.egg-info Python/dist; sudo python3 ./setup.py build --build-temp=./ install)
 
 py2:
-	(cd Python; rm -rf Python/build Python/ems.egg-info Python/dist; python ./setup.py build --build-temp=./ install)
+	(cd Python; sudo rm -rf Python/build Python/ems.egg-info Python/dist; sudo python ./setup.py build --build-temp=./ install)
 
 clean: clean_js clean_py3 clean_py2
 

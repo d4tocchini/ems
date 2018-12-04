@@ -35,15 +35,14 @@ import os
 import sys
 
 # Path to C library source code
-my_path = os.path.abspath(os.path.dirname(__file__))
-src_path = os.path.join(my_path, '../src/')
+src_path = '../src/'
 
 # OS Specific link flags
 link_args = []
 if sys.platform == "linux" or sys.platform == "linux2":
     link_args.append("-lrt")
 elif sys.platform == "darwin":
-    pass
+    link_args.append("-mmacosx-version-min=10.12")
 else:
     pass
 
@@ -51,8 +50,8 @@ setup(
     name="ems",
     version="1.4.0",
     py_modules=["ems"],
-    setup_requires=["cffi>=1.0.0"],
-    install_requires=["cffi>=1.0.0"],
+    setup_requires=["cffi>=1.12.0"],
+    install_requires=["cffi>=1.12.0"],
 
     # Author details
     author='Jace A Mogill',
@@ -67,7 +66,7 @@ setup(
     ext_modules=[Extension('libems.so',
                            [src_path + filename for filename in
                                ['collectives.cc', 'ems.cc', 'ems_alloc.cc', 'loops.cc', 'primitives.cc', 'rmw.cc']],
-                           extra_link_args=link_args
+                           extra_link_args=[link_args]
                            )],
     long_description='Persistent Shared Memory and Parallel Programming Model',
     keywords=["non volatile memory",
