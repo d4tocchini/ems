@@ -1,25 +1,46 @@
+const
+React = require('react'),
+ReactDOM = require('react-dom'),
+{ useSpring, animated } = require('react-spring');
 
-const React = require('react')
-const ReactDOM = require('react-dom')
-const { useSpring, animated } = require('react-spring')
-
-const calc = (x, y) => [-(y - window.innerHeight / 2) / 20, (x - window.innerWidth / 2) / 20, 1.1]
-const trans = (x, y, s) => `perspective(600px) rotateX(${x}deg) rotateY(${y}deg) scale(${s})`
-
-function Card() {
-  const [props, set] = useSpring({ xys: [0, 0, 1], config: { mass: 5, tension: 350, friction: 40 } })
-  return (
-    React.createElement(animated.div, {
-        className: "card",
-        style:{ transform: props.xys.interpolate(trans) },
-        onMouseMove({ clientX: x, clientY: y }) {
-            return set({ xys: calc(x, y) })
-        },
-        onMouseLeave() {
-           return set({ xys: [0, 0, 1] })
-        },
-    })
-  )
+function
+calc (x, y)
+{
+    return [
+        -(y - window.innerHeight / 2) / 20,
+        (x - window.innerWidth / 2) / 20, 1.1
+    ]
+}
+function
+trans (x, y, s)
+{
+    return `perspective(600px) rotateX(${x}deg) rotateY(${y}deg) scale(${s})`
+}
+function
+Card ()
+{
+    const
+    [spring_props, spring_set] = useSpring({
+        xys: [0, 0, 1],
+        config: { mass: 5, tension: 350, friction: 40 }
+    });
+    return React.createElement(
+        animated.div, {
+            className: "card",
+            style: {
+                transform: spring_props.xys.interpolate(trans)
+            },
+            onMouseMove (e)
+            {
+                return spring_set({ xys: calc(e.clientX, e.clientY) })
+            },
+            onMouseLeave ()
+            {
+                return spring_set({ xys: [0, 0, 1] })
+            },
+        })
 }
 
-ReactDOM.render(React.createElement(Card), document.getElementById('mount'))
+ReactDOM.render(
+    React.createElement(Card),
+    document.getElementById('mount'))

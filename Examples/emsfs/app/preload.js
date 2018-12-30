@@ -1,6 +1,6 @@
 
 process.once('loaded', () => {
-    const fs = require('fs')
+    const fs = require('../fs')
     const Module = require('module')
 
     Module._extensions['.css'] = function(module, filename) {

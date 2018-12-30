@@ -32,13 +32,15 @@
 
 SHELL := /bin/bash --init-file Make.sh -i
 
-all: py3 build_js help_notice test
+all: help_notice test
 
-.PHONY: all \
+.PHONY: all build \
 	build_js node electron \
 	test test_js test_electron test_py test_py3 test_py2 \
 	help help_notice \
 	clean clean_js clean_py3 clean_py2
+
+build: build_js py3
 
 help:
 	@echo "         Extended Memory Semantics  --  Build Targets"
@@ -58,13 +60,14 @@ help_notice:
 
 test: test_node test_py
 
-test_js: test_node test_electron
+test_js: test_electron test_node
 
 test_node:
 	test_node
 
 test_electron:
-	test_electron
+	test_e-
+	# test_electron
 
 test_py: test_py2 test_py3
 
@@ -78,13 +81,21 @@ node: dist/nodejs/Release/ems.node
 
 electron: dist/electron/Release/ems.node
 
-build_js: dist/nodejs/Release/ems.node dist/electron/Release/ems.node
+# e-: dist/e-/Release/ems.node
+
+build_js: dist/electron/Release/ems.node dist/nodejs/Release/ems.node
 
 dist/nodejs/Release/ems.node:
 	gyp_rebuild_node
 
 dist/electron/Release/ems.node:
-	gyp_rebuild_electron_if_needed
+	gyp_rebuild_e-
+
+# dist/electron/Release/ems.node:
+# 	gyp_rebuild_electron_if_needed
+
+# dist/e-/Release/ems.node:
+# 	gyp_rebuild_e-
 
 
 py: py2 py3

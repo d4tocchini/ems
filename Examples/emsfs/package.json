@@ -16,7 +16,7 @@
     "restart": ". ./cli.sh; restart main.js;"
   },
   "dependencies": {
-    "asar": "^0.14.5",
+    "asar": "^0.14.6",
     "lodash": "4.17.11",
     "react": "16.7.0-alpha.0",
     "react-dom": "16.7.0-alpha.0",

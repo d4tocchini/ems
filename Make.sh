@@ -5,8 +5,9 @@ shopt -s extglob
 __DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NODE_GYP_BIN="$__DIR"/node_modules/.bin/node-gyp
 
+pyenv global 3.7.0
 
-function test_js () {
+test_js () {
 	exe="$1"
 	echo "exe $exe"
 	nthreads=8
@@ -22,11 +23,15 @@ function test_js () {
 
 }
 
-function test_node () {
+test_node () {
 	test_js node
 }
 
-function test_electron () {
+test_e- () {
+	test_js e-node
+}
+
+test_electron () {
 	eval $(electron_pkg_env)
 	# only run electron tests if electron module in scope
 	[ ! -f "$electron_path" ] && exit 1
@@ -34,21 +39,39 @@ function test_electron () {
 	test_js "$electron_path";
 }
 
-function gyp_rebuild_node () {
+
+
+e-node () {
+	_ e- node.run "$@"
+}
+
+gyp_rebuild_node () {
 	mkdir -p dist/nodejs
-	node-gyp rebuild --build-dir=dist/nodejs
+	$NODE_GYP_BIN rebuild --build-dir=dist/nodejs
 	mv -f build/* dist/nodejs
 	rm -rf build
 }
 
 
-function gyp_rebuild_electron_if_needed () {
+gyp_rebuild_electron_if_needed () {
 
 	# If electron installed in npm context, derive node-gyp config exports
 	electron_path="" && eval $(electron_pkg_env)
 	[ ! -f "$electron_path" ] && \
 		echo "☞ No Electron to build" && \
 		exit 1
+
+	gyp_rebuild_electron
+
+}
+
+gyp_rebuild_e- () {
+	_ js npm.link
+	_ e- addon.env
+	gyp_rebuild_electron
+}
+
+gyp_rebuild_electron () {
 
 	# Architecture of Electron, ia32 or x64.
 	export npm_config_arch=x64
@@ -66,10 +89,10 @@ function gyp_rebuild_electron_if_needed () {
 	# Electron's version. which can be found at node_modules/electron/package.json my version is 1.7.9
 	export npm_config_target=$electron_version
 
-	# For electron forks or nightlies, to find headers for Electron's node, add Make.sh with:
-	#       export node_headers_dir=PATH_TO_ELECTRON_SRC/src/out/Release/gen/node_headers
-	[ -f "$electron_path"/Make.sh ] && \
-			source "$electron_path"/Make.sh
+	# # For electron forks or nightlies, to find headers for Electron's node, add Make.sh with:
+	# #       export node_headers_dir=PATH_TO_ELECTRON_SRC/src/out/Release/gen/node_headers
+	# [ -f "$electron_path"/Make.sh ] && \
+	# 		source "$electron_path"/Make.sh
 
 	# Explicitly redudance var exports & command-line flags due to flaky node-gyp surface area
 	cl_flags=""
@@ -89,7 +112,7 @@ function gyp_rebuild_electron_if_needed () {
 	rm -rf build
 }
 
-function electron_pkg_env () {
+electron_pkg_env () {
 	node -e "$(cat << \
 _______________________________________________________________________________
 		const out = (chunk) => process.stdout.write(chunk+'\n');
