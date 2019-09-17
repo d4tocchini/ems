@@ -42,43 +42,55 @@ int EMSpush(int mmapID, EMSvalueType *value) {  // TODO: Eventually promote retu
     EMStag_t newTag;
 
     // Wait until the stack top is full, then mark it busy while updating the stack
-    EMStransitionFEtag(&bufTags[EMScbTag(EMS_ARR_STACKTOP)], NULL, EMS_TAG_FULL, EMS_TAG_BUSY, EMS_TAG_ANY);
-    int32_t idx = bufInt64[EMScbData(EMS_ARR_STACKTOP)];  // TODO BUG: Truncating the full 64b range
+    EMStransitionFEtag(
+        &bufTags[EMScbTag(EMS_ARR_STACKTOP)],
+        NULL, EMS_TAG_FULL, EMS_TAG_BUSY, EMS_TAG_ANY);
+
+    // TODO: BUG: Truncating the full 64b range
+    int32_t idx = bufInt64[EMScbData(EMS_ARR_STACKTOP)];
+
     bufInt64[EMScbData(EMS_ARR_STACKTOP)]++;
+
     if (idx == bufInt64[EMScbData(EMS_ARR_NELEM)] - 1) {
         fprintf(stderr, "EMSpush: Ran out of stack entries\n");
         return -1;
     }
 
     //  Wait until the target memory at the top of the stack is empty
-    newTag.byte = EMStransitionFEtag(&bufTags[EMSdataTag(idx)], NULL, EMS_TAG_EMPTY, EMS_TAG_BUSY, EMS_TAG_ANY);
+    newTag.byte = EMStransitionFEtag(
+        &bufTags[EMSdataTag(idx)],
+        NULL, EMS_TAG_EMPTY, EMS_TAG_BUSY, EMS_TAG_ANY);
     newTag.tags.rw = 0;
     newTag.tags.type = value->type;
     newTag.tags.fe = EMS_TAG_FULL;
 
     //  Write the value onto the stack
-    switch (newTag.tags.type) {
-        case EMS_TYPE_BOOLEAN:
+    switch (newTag.tags.type)
+    {
+        case EMS_TYPE_UNDEFINED:
+            bufInt64[EMSdataData(idx)] = 0xdeadbeef;
+            break;
         case EMS_TYPE_INTEGER:
+        case EMS_TYPE_BOOLEAN:
         case EMS_TYPE_FLOAT:
             bufInt64[EMSdataData(idx)] = (int64_t) value->value;
             break;
-        case EMS_TYPE_BUFFER: {
-            int64_t byteOffset;
-            EMS_ALLOC(byteOffset, strlen((const char *) value->value), bufChar, "EMSpush: out of memory to store buffer\n", -1); // + 1 NULL padding
-            bufInt64[EMSdataData(idx)] = byteOffset;
-            memcpy(EMSheapPtr(byteOffset), (const char *) value->value, value->length);
-        }
-        case EMS_TYPE_JSON:
-        case EMS_TYPE_STRING: {
-            int64_t textOffset;
-            EMS_ALLOC(textOffset, strlen((const char *) value->value) + 1, bufChar, "EMSpush: out of memory to store string\n", -1);
-            bufInt64[EMSdataData(idx)] = textOffset;
-            strcpy(EMSheapPtr(textOffset), (const char *) value->value);
-        }
+        case EMS_TYPE_BUFFER:
+            {
+                int64_t byteOffset;
+                EMS_ALLOC(byteOffset, strlen((const char *) value->value), bufChar, "EMSpush: out of memory to store buffer\n", -1); // + 1 NULL padding
+                bufInt64[EMSdataData(idx)] = byteOffset;
+                memcpy(EMSheapPtr(byteOffset), (const char *) value->value, value->length);
+            }
             break;
-        case EMS_TYPE_UNDEFINED:
-            bufInt64[EMSdataData(idx)] = 0xdeadbeef;
+        case EMS_TYPE_JSON:
+        case EMS_TYPE_STRING:
+            {
+                int64_t textOffset;
+                EMS_ALLOC(textOffset, strlen((const char *) value->value) + 1, bufChar, "EMSpush: out of memory to store string\n", -1);
+                bufInt64[EMSdataData(idx)] = textOffset;
+                strcpy(EMSheapPtr(textOffset), (const char *) value->value);
+            }
             break;
         default:
             fprintf(stderr, "EMSpush: Unknown value type\n");
@@ -174,18 +186,27 @@ bool EMSpop(int mmapID, EMSvalueType *returnValue) {
 //  Enqueue data
 //  Heap top and bottom are monotonically increasing, but the index
 //  returned is a circular buffer.
-int EMSenqueue(int mmapID, EMSvalueType *value) {  // TODO: Eventually promote return value to 64bit
+int EMSenqueue(int mmapID, EMSvalueType *value) {
+    // TODO: Eventually promote return value to 64bit
+
     void *emsBuf = emsBufs[mmapID];
     int64_t *bufInt64 = (int64_t *) emsBuf;
     EMStag_t *bufTags = (EMStag_t *) emsBuf;
     char *bufChar = (char *) emsBuf;
 
     //  Wait until the heap top is full, and mark it busy while data is enqueued
-    EMStransitionFEtag(&bufTags[EMScbTag(EMS_ARR_STACKTOP)], NULL, EMS_TAG_FULL, EMS_TAG_BUSY, EMS_TAG_ANY);
-    int32_t idx = bufInt64[EMScbData(EMS_ARR_STACKTOP)] % bufInt64[EMScbData(EMS_ARR_NELEM)];  // TODO: BUG  This could be truncated
+    EMStransitionFEtag(
+        &bufTags[EMScbTag(EMS_ARR_STACKTOP)],
+        NULL, EMS_TAG_FULL, EMS_TAG_BUSY, EMS_TAG_ANY);
+    int32_t idx = bufInt64[EMScbData(EMS_ARR_STACKTOP)]
+                % bufInt64[EMScbData(EMS_ARR_NELEM)];
+                // TODO: BUG  This could be truncated
     bufInt64[EMScbData(EMS_ARR_STACKTOP)]++;
-    if (bufInt64[EMScbData(EMS_ARR_STACKTOP)] - bufInt64[EMScbData(EMS_ARR_Q_BOTTOM)] >
-        bufInt64[EMScbData(EMS_ARR_NELEM)]) {
+    if (
+            bufInt64[EMScbData(EMS_ARR_STACKTOP)] - bufInt64[EMScbData(EMS_ARR_Q_BOTTOM)] >
+            bufInt64[EMScbData(EMS_ARR_NELEM)]
+        )
+    {
         fprintf(stderr, "EMSenqueue: Ran out of stack entries\n");
         return -1;
     }
@@ -194,6 +215,9 @@ int EMSenqueue(int mmapID, EMSvalueType *value) {  // TODO: Eventually promote r
     bufTags[EMSdataTag(idx)].tags.rw = 0;
     bufTags[EMSdataTag(idx)].tags.type = value->type;
     switch (bufTags[EMSdataTag(idx)].tags.type) {
+        case EMS_TYPE_UNDEFINED:
+            bufInt64[EMSdataData(idx)] = 0xdeadbeef;
+            break;
         case EMS_TYPE_BOOLEAN:
         case EMS_TYPE_INTEGER:
         case EMS_TYPE_FLOAT:
@@ -206,6 +230,7 @@ int EMSenqueue(int mmapID, EMSvalueType *value) {  // TODO: Eventually promote r
             EMS_ALLOC(byteOffset, byteLength, bufChar, "EMSenqueue: out of memory to store buffer\n", -1); // +1 NULL padding
             bufInt64[EMSdataData(idx)] = byteOffset;
             memcpy(EMSheapPtr(byteOffset), (const char *) value->value, byteLength);
+            break;
         }
         case EMS_TYPE_JSON:
         case EMS_TYPE_STRING: {
@@ -215,9 +240,7 @@ int EMSenqueue(int mmapID, EMSvalueType *value) {  // TODO: Eventually promote r
             strcpy(EMSheapPtr(textOffset), (const char *) value->value);
         }
             break;
-        case EMS_TYPE_UNDEFINED:
-            bufInt64[EMSdataData(idx)] = 0xdeadbeef;
-            break;
+
         default:
             fprintf(stderr, "EMSenqueue: Unknown value type\n");
             return -1;

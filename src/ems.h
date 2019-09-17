@@ -45,12 +45,27 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 
+#include <stdbool.h> 
+
 #if !defined _GNU_SOURCE
 #  define _GNU_SOURCE
 #endif
 #include <sched.h>
 
 #include "ems_alloc.h"
+
+//==================================================================
+// EMS init flags
+//
+#define EMS_USE_MAP             0b00000000100000000000000000000000
+#define EMS_PERSIST             0b00000001000000000000000000000000
+#define EMS_CLEAR               0b00000010000000000000000000000000
+#define EMS_FILL                0b00000100000000000000000000000000
+#define EMS_FILL_JSON           0b00001100000000000000000000000000
+#define EMS_SET_E               0b00010000000000000000000000000000
+#define EMS_SET_F               0b00110000000000000000000000000000
+#define EMS_PIN_THREADS         0b01000000000000000000000000000000
+#define EMS_MLOCK_PCT_MASK      0b00000000000000000000000001111111
 
 //==================================================================
 // EMS Full/Empty Tag States
@@ -65,15 +80,25 @@
 //==================================================================
 // EMS Data types
 //
-#define EMS_TYPE_INVALID      ((unsigned char)0)
-#define EMS_TYPE_BOOLEAN      ((unsigned char)1)
-#define EMS_TYPE_STRING       ((unsigned char)2)
-#define EMS_TYPE_FLOAT        ((unsigned char)3)
-#define EMS_TYPE_INTEGER      ((unsigned char)4)
-#define EMS_TYPE_UNDEFINED    ((unsigned char)5)
-#define EMS_TYPE_JSON         ((unsigned char)6)  // Catch-all for JSON arrays and Objects
-#define EMS_TYPE_BUFFER       ((unsigned char)7)  // Catch-all for JSON arrays and Objects
-
+#ifdef EMS_TYPE_0_INVALID
+  #define EMS_TYPE_INVALID      ((unsigned char)0)
+  #define EMS_TYPE_BOOLEAN      ((unsigned char)1)
+  #define EMS_TYPE_STRING       ((unsigned char)2)
+  #define EMS_TYPE_FLOAT        ((unsigned char)3)
+  #define EMS_TYPE_INTEGER      ((unsigned char)4)
+  #define EMS_TYPE_UNDEFINED    ((unsigned char)5)
+  #define EMS_TYPE_JSON         ((unsigned char)6)  // Catch-all for JSON arrays and Objects
+  #define EMS_TYPE_BUFFER       ((unsigned char)7)  // Catch-all for JSON arrays and Objects
+#else
+  #define EMS_TYPE_UNDEFINED    ((unsigned char)0)
+  #define EMS_TYPE_INTEGER      ((unsigned char)1)
+  #define EMS_TYPE_STRING       ((unsigned char)2)
+  #define EMS_TYPE_BUFFER       ((unsigned char)3)
+  #define EMS_TYPE_FLOAT        ((unsigned char)4)
+  #define EMS_TYPE_BOOLEAN      ((unsigned char)5)
+  #define EMS_TYPE_INVALID      ((unsigned char)6)   // TODO: remove
+  #define EMS_TYPE_JSON         ((unsigned char)7)  // Catch-all for JSON arrays and Objects
+#endif
 
 
 //==================================================================
@@ -81,20 +106,30 @@
 //
 //        Name          Offset      Description of contents
 //---------------------------------------------------------------------------------------
-#define NWORDS_PER_CACHELINE 16
-#define EMS_ARR_NELEM      (0 * NWORDS_PER_CACHELINE)   // Maximum number of elements in the EMS array
-#define EMS_ARR_HEAPSZ     (1 * NWORDS_PER_CACHELINE)   // # bytes of storage for array data: strings, JSON, maps, etc.
-#define EMS_ARR_Q_BOTTOM   (2 * NWORDS_PER_CACHELINE)   // Current index of the queue bottom
-#define EMS_ARR_STACKTOP   (3 * NWORDS_PER_CACHELINE)   // Current index of the top of the stack/queue
-#define EMS_ARR_MAPBOT     (4 * NWORDS_PER_CACHELINE)   // Index of the base of the index map
-#define EMS_ARR_MALLOCBOT  (5 * NWORDS_PER_CACHELINE)   // Index of the base of the heap -- malloc structs start here
-#define EMS_ARR_HEAPBOT    (6 * NWORDS_PER_CACHELINE)   // Index of the base of data on the heap -- strings start here
-#define EMS_ARR_MEM_MUTEX  (7 * NWORDS_PER_CACHELINE)   // Mutex lock for thememory allocator of this EMS region's
-#define EMS_ARR_FILESZ     (8 * NWORDS_PER_CACHELINE)   // Total size in bytes of the EMS region
-// Tag data may follow data by as much as 8 words, so
-// A gap of at least 8 words is required to leave space for
-// the tags associated with header data
-#define EMS_ARR_CB_SIZE   (16 * NWORDS_PER_CACHELINE)   // Index of the first EMS array element
+#define NWORDS_PER_CACHELINE  16
+#define EMS_ARR_NELEM         0
+  // * 0 // Maximum number of elements in the EMS array
+#define EMS_ARR_HEAPSZ        16
+  // * 1 // # bytes of storage for array data: strings, JSON, maps, etc.
+#define EMS_ARR_Q_BOTTOM      32
+  // (2 * NWORDS_PER_CACHELINE) // Current index of the queue bottom
+#define EMS_ARR_STACKTOP      48
+  // (3 * NWORDS_PER_CACHELINE)   // Current index of the top of the stack/queue
+#define EMS_ARR_MAPBOT        64
+  // (4 * NWORDS_PER_CACHELINE)   // Index of the base of the index map
+#define EMS_ARR_MALLOCBOT     80
+  // (5 * NWORDS_PER_CACHELINE)   // Index of the base of the heap -- malloc structs start here
+#define EMS_ARR_HEAPBOT       96
+  // (6 * NWORDS_PER_CACHELINE)   // Index of the base of data on the heap -- strings start here
+#define EMS_ARR_MEM_MUTEX     112
+  // (7 * NWORDS_PER_CACHELINE)   // Mutex lock for thememory allocator of this EMS region's
+#define EMS_ARR_FILESZ        128
+  // (8 * NWORDS_PER_CACHELINE)   // Total size in bytes of the EMS region
+  // Tag data may follow data by as much as 8 words, so
+  // A gap of at least 8 words is required to leave space for
+  // the tags associated with header data
+#define EMS_ARR_CB_SIZE       256
+  // (16 * NWORDS_PER_CACHELINE)   // Index of the first EMS array element
 
 
 
@@ -135,9 +170,11 @@ extern char    emsBufFilenames[EMS_MAX_N_BUFS][MAX_FNAME_LEN];
 //==================================================================
 //  Macros to translate from EMS Data Indexes and EMS Control Block
 //  indexes to offsets in the EMS shared memory
-#define EMSwordSize          (sizeof(size_t))
-#define EMSnWordsPerTagWord  (EMSwordSize-1)
-#define EMSnWordsPerLine     EMSwordSize
+#define EMSwordSize           8 //(sizeof(size_t))
+#define EMSwordSize_pow2      3 //EMSwordSize
+#define EMSnWordsPerTagWord   7 //(EMSwordSize-1)
+#define EMSnWordsPerLine      8 //EMSwordSize
+#define EMSnWordsPerLine_pow2 3 //EMSwordSize
 
 
 //==================================================================
@@ -149,11 +186,17 @@ extern char    emsBufFilenames[EMS_MAX_N_BUFS][MAX_FNAME_LEN];
 //     Untagged Memory
 //         Malloc: Storage for the free/used structures
 //         Heap:   Open Heap storage
-#define EMSappIdx2emsIdx(idx)         ((((idx) / EMSnWordsPerTagWord) * EMSnWordsPerLine) + ((idx) % EMSnWordsPerTagWord) )
-#define EMSappIdx2LineIdx(idx)        ( ((idx) / EMSnWordsPerTagWord) * EMSnWordsPerLine)
-#define EMSappIdx2TagWordIdx(idx)     ( EMSappIdx2LineIdx(idx) + EMSnWordsPerTagWord )
-#define EMSappIdx2TagWordOffset(idx)  ( EMSappIdx2TagWordIdx(idx) * EMSwordSize )
-#define EMSappTag2emsTag(idx)         ( EMSappIdx2TagWordOffset(idx) + ((idx) % EMSnWordsPerTagWord) )
+#define EMSappIdx2emsIdx(idx) \
+  ( (((idx) / EMSnWordsPerTagWord) << EMSnWordsPerLine_pow2) \
+    + ((idx) % EMSnWordsPerTagWord) )
+#define EMSappIdx2LineIdx(idx) \
+  ( ((idx) / EMSnWordsPerTagWord) << EMSnWordsPerLine_pow2)
+#define EMSappIdx2TagWordIdx(idx) \
+  ( EMSappIdx2LineIdx(idx) + EMSnWordsPerTagWord )
+#define EMSappIdx2TagWordOffset(idx) \
+  ( EMSappIdx2TagWordIdx(idx) << EMSwordSize_pow2 )
+#define EMSappTag2emsTag(idx) \
+  ( EMSappIdx2TagWordOffset(idx) + ((idx) % EMSnWordsPerTagWord) )
 #define EMScbData(idx)        EMSappIdx2emsIdx(idx)
 #define EMScbTag(idx)         EMSappTag2emsTag(idx)
 #define EMSdataData(idx)    ( EMSappIdx2emsIdx((idx) + EMS_ARR_CB_SIZE) )
@@ -170,18 +213,36 @@ extern char    emsBufFilenames[EMS_MAX_N_BUFS][MAX_FNAME_LEN];
 //  Yield the processor and sleep (using exponential decay) without
 //  using resources/
 //  Used within spin-loops to reduce hot-spotting
-#define RESET_NAP_TIME  int EMScurrentNapTime = 1
-#define MAX_NAP_TIME  1000000
-#define NANOSLEEP    {                         \
-    struct timespec     sleep_time;            \
-    sleep_time.tv_sec  = 0;                    \
-    sleep_time.tv_nsec = EMScurrentNapTime;    \
-    nanosleep(&sleep_time, NULL);              \
-    EMScurrentNapTime *= 2;                    \
-    if(EMScurrentNapTime > MAX_NAP_TIME) {     \
-        EMScurrentNapTime = MAX_NAP_TIME;      \
-    }                                          \
+
+#define TIME_ms_to_ns(x) ( ((x)<<10) - ((x)<<5) + ((x)<<3) )
+
+#define RESET_NAP_TIME() \
+  int ems_nano_sleep_total = 0;\
+  int EMScurrentNapTime = 16; // 1 // D4
+
+#define MAX_NAP_TIME  524288L // .5 (sec) == 1 << 19 (ns)
+
+#define NANOSLEEP    {\
+    struct timespec     sleep_time;\
+    sleep_time.tv_sec  = 0;\
+    sleep_time.tv_nsec = EMScurrentNapTime;\
+    nanosleep(&sleep_time, NULL);\
+    ems_nano_sleep_total += EMScurrentNapTime;\
+    EMScurrentNapTime <<= 1;\
+    if(EMScurrentNapTime > MAX_NAP_TIME) {\
+        EMScurrentNapTime = MAX_NAP_TIME;\
+    }\
  }
+
+ #define WHILE_NANOTIME(max_ms) \
+    int64_t ems_nano_sleep_max = max_ms;\
+    ems_nano_sleep_max = TIME_ms_to_ns( ems_nano_sleep_max );\
+    while ( ems_nano_sleep_max == 0 || ((ems_nano_sleep_max) - ems_nano_sleep_total) >= 0)
+
+#define NANO_TIMEIN(name)    do {\
+    RESET_NAP_TIME()\
+    int ems_timeout_lapse_#name = 0;\
+ } while(0)
 
 
 #define EMS_ALLOC(addr, len, bufChar, errmsg, retval)                    \
@@ -206,7 +267,9 @@ void emsMutexMem_free(struct emsMem *heap,  // Base of EMS malloc structs
 
 extern int EMSmyID;   // EMS Thread ID
 
-#define EMSisMapped (bufInt64[EMScbData(EMS_ARR_MAPBOT)]*(int64_t)EMSwordSize != bufInt64[EMScbData(EMS_ARR_MALLOCBOT)])
+#define EMSisMapped \
+  ( (bufInt64[EMScbData(EMS_ARR_MAPBOT)] << EMSwordSize_pow2) \
+  != bufInt64[EMScbData(EMS_ARR_MALLOCBOT)] )
 
 #include "ems_proto.h"
 

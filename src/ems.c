@@ -1,40 +1,9 @@
-/*-----------------------------------------------------------------------------+
- |  Extended Memory Semantics (EMS)                            Version 1.4.0   |
- |  Synthetic Semantics       http://www.synsem.com/       mogill@synsem.com   |
- +-----------------------------------------------------------------------------+
- |  Copyright (c) 2011-2014, Synthetic Semantics LLC.  All rights reserved.    |
- |  Copyright (c) 2015-2016, Jace A Mogill.  All rights reserved.              |
- |                                                                             |
- | Redistribution and use in source and binary forms, with or without          |
- | modification, are permitted provided that the following conditions are met: |
- |    * Redistributions of source code must retain the above copyright         |
- |      notice, this list of conditions and the following disclaimer.          |
- |    * Redistributions in binary form must reproduce the above copyright      |
- |      notice, this list of conditions and the following disclaimer in the    |
- |      documentation and/or other materials provided with the distribution.   |
- |    * Neither the name of the Synthetic Semantics nor the names of its       |
- |      contributors may be used to endorse or promote products derived        |
- |      from this software without specific prior written permission.          |
- |                                                                             |
- |    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS      |
- |    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT        |
- |    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR    |
- |    A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL SYNTHETIC         |
- |    SEMANTICS LLC BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,   |
- |    EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,      |
- |    PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR       |
- |    PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF   |
- |    LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING     |
- |    NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS       |
- |    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.             |
- |                                                                             |
- +-----------------------------------------------------------------------------*/
 #include "ems.h"
 
 //==================================================================
 //  Resolve External Declarations
 //
-int EMSmyID = -1;   // EMS Process ID
+// int EMSmyID = -1;   // EMS Process ID
 char   *emsBufs[EMS_MAX_N_BUFS] = { NULL };
 size_t  emsBufLengths[EMS_MAX_N_BUFS] = { 0 };
 char    emsBufFilenames[EMS_MAX_N_BUFS][MAX_FNAME_LEN] = { { 0 } };
@@ -51,11 +20,11 @@ size_t emsMutexMem_alloc(struct emsMem *heap,   // Base of EMS malloc structs
                          size_t len,            // Number of bytes to allocate
                          volatile char *mutex)  // Pointer to the mem allocator's mutex
 {
-    RESET_NAP_TIME;
+    RESET_NAP_TIME()
     // Wait until we acquire the allocator's mutex
-    while (!__sync_bool_compare_and_swap(mutex, EMS_TAG_EMPTY, EMS_TAG_FULL)) {
+    while (!__sync_bool_compare_and_swap(mutex, EMS_TAG_EMPTY, EMS_TAG_FULL))
         NANOSLEEP;
-    }
+
     size_t retval = emsMem_alloc(heap, len);
     *mutex = EMS_TAG_EMPTY;    // Unlock the allocator's mutex
     return (retval);
@@ -66,11 +35,11 @@ void emsMutexMem_free(struct emsMem *heap,  // Base of EMS malloc structs
                       size_t addr,          // Offset of alloc'd block in EMS memory
                       volatile char *mutex) // Pointer to the mem allocator's mutex
 {
-    RESET_NAP_TIME;
+    RESET_NAP_TIME()
     // Wait until we acquire the allocator's mutex
-    while (!__sync_bool_compare_and_swap(mutex, EMS_TAG_EMPTY, EMS_TAG_FULL)) {
+    while (!__sync_bool_compare_and_swap(mutex, EMS_TAG_EMPTY, EMS_TAG_FULL))
         NANOSLEEP;
-    }
+
     emsMem_free(heap, addr);
     *mutex = EMS_TAG_EMPTY;   // Unlock the allocator's mutex
 }
@@ -82,14 +51,11 @@ void emsMutexMem_free(struct emsMem *heap,  // Base of EMS malloc structs
 //==================================================================
 //  Convert any type of key to an index
 //
-int64_t EMSkey2index(void *emsBuf, EMSvalueType *key, bool is_mapped) {
-    volatile EMStag_t *bufTags = (EMStag_t *) emsBuf;
-    volatile int64_t *bufInt64 = (int64_t *) emsBuf;
-    volatile double *bufDouble = (double *) emsBuf;
-    const char *bufChar = (char *) emsBuf;
-
+int64_t ems_key2hash(EMSvalueType *key)
+{
     int64_t idx = 0;
-    switch (key->type) {
+    switch (key->type)
+    {
         case EMS_TYPE_BOOLEAN:
             if ((bool) key->value)  idx = 1;
             else                    idx = 0;
@@ -104,67 +70,100 @@ int64_t EMSkey2index(void *emsBuf, EMSvalueType *key, bool is_mapped) {
             idx = EMShashString((char *) key->value);
             break;
         case EMS_TYPE_UNDEFINED:
-            fprintf(stderr, "EMS ERROR: EMSkey2index keyType is defined as Undefined\n");
+            fprintf(stderr, "EMS ERROR: ems_key2hash keyType is defined as Undefined\n");
             return -1;
         default:
-            fprintf(stderr, "EMS ERROR: EMSkey2index keyType(%d) is unknown\n", key->type);
+            fprintf(stderr, "EMS ERROR: ems_key2hash keyType(%d) is unknown\n", key->type);
             return -1;
     }
+    return idx;
+}
+
+inline int64_t ems_arr_hash2index(int64_t *bufInt64, int64_t hash) {
+    return hash % bufInt64[EMScbData(EMS_ARR_NELEM)];
+}
+
+int64_t ems_map_hash2index(void *emsBuf, EMSvalueType *key, int64_t idx)
+{
+    volatile EMStag_t *bufTags = (EMStag_t *) emsBuf;
+    volatile int64_t *bufInt64 = (int64_t *) emsBuf;
+    volatile double *bufDouble = (double *) emsBuf;
+    const char *bufChar = (char *) emsBuf;
 
     int nTries = 0;
     bool matched = false;
     bool notPresent = false;
     EMStag_t mapTags;
-    if (is_mapped) {
-        while (nTries < MAX_OPEN_HASH_STEPS && !matched && !notPresent) {
-            idx = idx % bufInt64[EMScbData(EMS_ARR_NELEM)];
-            // Wait until the map key is FULL, mark it busy while map lookup is performed
-            mapTags.byte = EMStransitionFEtag(&bufTags[EMSmapTag(idx)], NULL, EMS_TAG_FULL, EMS_TAG_BUSY, EMS_TAG_ANY);
-            if (mapTags.tags.type == key->type) {
-                switch (key->type) {
-                    case EMS_TYPE_BOOLEAN:
-                    case EMS_TYPE_INTEGER:
-                        if ((int64_t) key->value == bufInt64[EMSmapData(idx)]) {
-                            matched = true;
-                        }
-                        break;
-                    case EMS_TYPE_FLOAT: {
-                        EMSulong_double alias;
-                        alias.u64 = (uint64_t) key->value;
-                        if (alias.d == bufDouble[EMSmapData(idx)]) {
-                            matched = true;
-                        }
-                    }
-                        break;
-                    case EMS_TYPE_STRING: {
-                        int64_t keyStrOffset = bufInt64[EMSmapData(idx)];
-                        if (strcmp((const char *) key->value, EMSheapPtr(keyStrOffset)) == 0) {
-                            matched = true;
-                        }
-                    }
-                        break;
-                    case EMS_TYPE_UNDEFINED:
-                        // Nothing hashed to this map index yet, so the key does not exist
-                        notPresent = true;
-                        break;
-                    default:
-                        fprintf(stderr, "EMS ERROR: EMSreadIndexMap: Unknown mem type\n");
+    while (nTries < MAX_OPEN_HASH_STEPS && !matched && !notPresent)
+    {
+        idx = idx % bufInt64[EMScbData(EMS_ARR_NELEM)];
+        // Wait until the map key is FULL, mark it busy while map lookup is performed
+        mapTags.byte = EMStransitionFEtag(&bufTags[EMSmapTag(idx)], NULL, EMS_TAG_FULL, EMS_TAG_BUSY, EMS_TAG_ANY);
+        if (mapTags.tags.type == key->type)
+        {
+            switch (key->type)
+            {
+                case EMS_TYPE_BOOLEAN:
+                case EMS_TYPE_INTEGER:
+                    if ((int64_t) key->value == bufInt64[EMSmapData(idx)])
+                        matched = true;
+                    break;
+                case EMS_TYPE_FLOAT: {
+                    EMSulong_double alias;
+                    alias.u64 = (uint64_t) key->value;
+                    if (alias.d == bufDouble[EMSmapData(idx)])
                         matched = true;
                 }
-            }
-            if (mapTags.tags.type == EMS_TYPE_UNDEFINED) notPresent = true;
-            bufTags[EMSmapTag(idx)].tags.fe = EMS_TAG_FULL;
-            if (!matched) {
-                //  No match, set this Map entry back to full and try again
-                nTries++;
-                idx++;
+                    break;
+                case EMS_TYPE_STRING: {
+                    int64_t keyStrOffset = bufInt64[EMSmapData(idx)];
+                    if (strcmp(
+                            (const char *) key->value,
+                            EMSheapPtr(keyStrOffset)
+                        ) == 0)
+                    {
+                        matched = true;
+                    }
+                }
+                    break;
+                case EMS_TYPE_UNDEFINED:
+                    // Nothing hashed to this map index yet, so the key does not exist
+                    notPresent = true;
+                    break;
+                default:
+                    fprintf(stderr, "EMS ERROR: EMSreadIndexMap: Unknown mem type\n");
+                    matched = true;
             }
         }
-        if (!matched) { idx = -1; }
+        if (mapTags.tags.type == EMS_TYPE_UNDEFINED)
+            notPresent = true;
+        bufTags[EMSmapTag(idx)].tags.fe = EMS_TAG_FULL;
+        if (!matched)
+        {
+            //  No match, set this Map entry back to full and try again
+            nTries++;
+            idx++;
+        }
     }
+    if (!matched)
+        return -1;
 
-    int64_t retval = idx % bufInt64[EMScbData(EMS_ARR_NELEM)];
-    return retval;
+
+    return idx % bufInt64[EMScbData(EMS_ARR_NELEM)];
+}
+
+
+#define EMSkey2index(emsBuf, key, is_mapped)\
+    ((is_mapped) ? ems_map_key2index((emsBuf), (key)) : ems_arr_key2index((emsBuf), (key)))
+
+int64_t ems_arr_key2index(int64_t *bufInt64, EMSvalueType *key) {
+    // int64_t idx = ems_key2hash(key);
+    return ems_arr_hash2index(bufInt64, ems_key2hash(key));
+}
+
+int64_t ems_map_key2index(void *emsBuf, EMSvalueType *key)
+{
+    return ems_map_hash2index(emsBuf, key, ems_key2hash(key));
 }
 
 
@@ -181,7 +180,7 @@ static void EMSarrFinalize(char *data, void *hint) {
     v8::HandleScope scope;
     EMS_DECL(args);
     size_t length = buffer->handle_->GetIndexedPropertiesExternalArrayDataLength();
-    
+
     if(-1 == munmap(emsBuf, length)) return v8::False();
     
     // JQM TODO  shoud unlink here?
@@ -204,30 +203,47 @@ static void EMSarrFinalize(char *data, void *hint) {
 //  Wait until the FE tag is a particular state, then transition it to the new state
 //  Return new tag state
 //
-unsigned char EMStransitionFEtag(EMStag_t volatile *tag, EMStag_t volatile *mapTag,
-                                 unsigned char oldFE, unsigned char newFE, unsigned char oldType) {
-    RESET_NAP_TIME;
+unsigned char EMStransitionFEtag(
+    EMStag_t volatile *tag,
+    EMStag_t volatile *mapTag,
+    unsigned char oldFE,
+    unsigned char newFE,
+    unsigned char oldType)
+{
+    RESET_NAP_TIME()
     EMStag_t oldTag;           //  Desired tag value to start of the transition
     EMStag_t newTag;           //  Tag value at the end of the transition
     EMStag_t volatile memTag;  //  Tag value actually stored in memory
     memTag.byte = tag->byte;
-    while (oldType == EMS_TAG_ANY || memTag.tags.type == oldType) {
-        oldTag.byte = memTag.byte;  // Copy current type and RW count information
-        oldTag.tags.fe = oldFE;        // Set the desired start tag state
-        newTag.byte = memTag.byte;  // Copy current type and RW count information
-        newTag.tags.fe = newFE;        // Set the final tag state
-
+    while (oldType == EMS_TAG_ANY || memTag.tags.type == oldType)
+    {
+        // Copy current type and RW count information
+        oldTag.byte = memTag.byte;
+        // Set the desired start tag state
+        oldTag.tags.fe = oldFE;
+        // Copy current type and RW count information
+        newTag.byte = memTag.byte;
+        // Set the final tag state
+        newTag.tags.fe = newFE;
         //  Attempt to transition the state from old to new
         memTag.byte = __sync_val_compare_and_swap(&(tag->byte), oldTag.byte, newTag.byte);
-        if (memTag.byte == oldTag.byte) {
+
+        if (memTag.byte == oldTag.byte)
             return (newTag.byte);
-        } else {
-            // Allow preemptive map acquisition while waiting for data
-            if (mapTag) { mapTag->tags.fe = EMS_TAG_FULL; }
-            NANOSLEEP;
-            if (mapTag) { EMStransitionFEtag(mapTag, NULL, EMS_TAG_FULL, EMS_TAG_BUSY, EMS_TAG_ANY); }
-            memTag.byte = tag->byte;  // Re-load tag in case was transitioned by another thread
-        }
+
+        // else Allow preemptive map acquisition while waiting for data
+        if (mapTag)
+            mapTag->tags.fe = EMS_TAG_FULL;
+
+        NANOSLEEP;
+
+        if (mapTag)
+            EMStransitionFEtag(mapTag, NULL,
+                EMS_TAG_FULL, EMS_TAG_BUSY, EMS_TAG_ANY);
+
+        // Re-load tag in case was transitioned by another thread
+        memTag.byte = tag->byte;
+
     }
     return (memTag.byte);
 }
@@ -257,31 +273,51 @@ int64_t EMShashString(const char *key) {
 //  match, the map key is left empty and this function
 //  returns the index of an existing or available array element.
 //
-int64_t EMSwriteIndexMap(const int mmapID, EMSvalueType *key) {
+int64_t EMSwriteIndexMap(const int mmapID, EMSvalueType *key)
+{
     char *emsBuf = emsBufs[mmapID];
     volatile int64_t  *bufInt64  = (int64_t *) emsBuf;
-    volatile char     *bufChar   = emsBuf;
-    volatile EMStag_t *bufTags   = (EMStag_t *) emsBuf;
-    volatile double   *bufDouble = (double *) emsBuf;
-    EMStag_t mapTags;
 
+    bool is_mapped = EMSisMapped;
+
+    int64_t hash = ems_key2hash(key);
+    int64_t idx = (is_mapped)
+        ?   ems_map_hash2index(emsBuf, key, hash)
+        :   ems_arr_hash2index(bufInt64, hash)
+    ;
     //  If the key already exists, use it
-    int64_t idx = EMSkey2index(emsBuf, key, EMSisMapped);
-    if(idx > 0) {
-        // fprintf(stderr, "write index map -- key already existed\n");
+    if (idx > 0)
         return idx;
+        // fprintf(stderr, "write index map -- key already existed\n");
+    if (!is_mapped) {
+        if (idx < 0 || idx >= bufInt64[EMScbData(EMS_ARR_NELEM)]) {
+            fprintf(stderr, "Wasn't mapped do bounds check\n");
+            return -1;
+        }
     }
-    idx = EMSkey2index(emsBuf, key, false);
-    int nTries = 0;
-    if (EMSisMapped) {
+    else {
+        idx = ems_arr_hash2index(bufInt64, hash); // ...
+
+        volatile char     *bufChar   = emsBuf;
+        volatile EMStag_t *bufTags   = (EMStag_t *) emsBuf;
+        volatile double   *bufDouble = (double *) emsBuf;
+        EMStag_t mapTags;
+        int nTries = 0;
         int matched = false;
         while (nTries < MAX_OPEN_HASH_STEPS && !matched) {
-            idx = idx % bufInt64[EMScbData(EMS_ARR_NELEM)];
             // Wait until the map key is FULL, mark it busy while map lookup is performed
-            mapTags.byte = EMStransitionFEtag(&bufTags[EMSmapTag(idx)], NULL, EMS_TAG_FULL, EMS_TAG_BUSY, EMS_TAG_ANY);
+            mapTags.byte = EMStransitionFEtag(
+                &bufTags[EMSmapTag(idx)], NULL,
+                EMS_TAG_FULL, EMS_TAG_BUSY, EMS_TAG_ANY);
+
             mapTags.tags.fe = EMS_TAG_FULL;  // When written back, mark FULL
-            if (mapTags.tags.type == key->type || mapTags.tags.type == EMS_TYPE_UNDEFINED) {
-                switch (mapTags.tags.type) {
+
+            if (
+                mapTags.tags.type == key->type ||
+                mapTags.tags.type == EMS_TYPE_UNDEFINED)
+            {
+                switch (mapTags.tags.type)
+                {
                     case EMS_TYPE_BOOLEAN:
                         if ((int64_t) key->value == (bufInt64[EMSmapData(idx)] != 0)) {
                             matched = true;
@@ -353,20 +389,17 @@ int64_t EMSwriteIndexMap(const int mmapID, EMSvalueType *key) {
             if (!matched) {
                 // No match so set this key map back to full and try the next entry
                 bufTags[EMSmapTag(idx)].tags.fe = EMS_TAG_FULL;
-                nTries++;
-                idx++;
+
+                ++nTries;
+                // TODO:  MAX_OPEN_HASH_STEPS should be computed?
+
+                idx = ems_arr_hash2index(bufInt64, idx + 1);
             }
         }
-    } else {  // Wasn't mapped, do bounds check
-        if (idx < 0 || idx >= bufInt64[EMScbData(EMS_ARR_NELEM)]) {
-            fprintf(stderr, "Wasn't mapped do bounds check\n");
+        if (nTries >= MAX_OPEN_HASH_STEPS) {
             idx = -1;
+            fprintf(stderr, "EMSwriteIndexMap ran out of key mappings (ntries=%d)\n", nTries);
         }
-    }
-
-    if (nTries >= MAX_OPEN_HASH_STEPS) {
-        idx = -1;
-        fprintf(stderr, "EMSwriteIndexMap ran out of key mappings (ntries=%d)\n", nTries);
     }
 
     return idx;
@@ -379,158 +412,211 @@ int64_t EMSwriteIndexMap(const int mmapID, EMSvalueType *key) {
 bool EMSreadUsingTags(const int mmapID,
                       EMSvalueType *key, // Index to read from
                       EMSvalueType *returnValue,
-                      unsigned char initialFE,            // Block until F/E tags are this value
-                      unsigned char finalFE)              // Set the tag to this value when done
+                      unsigned char initialFE, // Block until F/E tags are this value
+                      unsigned char finalFE, // Set the tag to this value when done
+                      int64_t timeout_ms) // default = 0 = forever
 {
-    RESET_NAP_TIME;
     void *emsBuf = emsBufs[mmapID];
-    volatile EMStag_t *bufTags = (EMStag_t *) emsBuf;
     volatile int64_t *bufInt64 = (int64_t *) emsBuf;
-    volatile double *bufDouble = (double *) emsBuf;
-    const char *bufChar = (const char *) emsBuf;
 
     returnValue->type  = EMS_TYPE_UNDEFINED;
     returnValue->value = (void *) 0xdeafbeef;  // TODO: Should return default value even when not doing write allocate
 
-    EMStag_t newTag, oldTag, memTag;
-    int64_t idx = EMSkey2index(emsBuf, key, EMSisMapped);
+    int64_t idx;
+    bool is_mapped = EMSisMapped;
 
-    //  Allocate on Write, writes include modification of the tag:
-    //  If the EMS object being read is undefined and we're changing the f/e state
-    //  then allocate the undefined object and set the state.  If the state is
-    //  not changing, do not allocate the undefined element.
-    if(EMSisMapped  &&  idx < 0) {
-        if (finalFE != EMS_TAG_ANY) {
-            idx = EMSwriteIndexMap(mmapID, key);
-            if (idx < 0) {
+    if (is_mapped)
+    {
+        //  Allocate on Write, writes include modification of the tag:
+        //  If the EMS object being read is undefined and we're changing the f/e state
+        //  then allocate the undefined object and set the state.  If the state is
+        //  not changing, do not allocate the undefined element.
+        if (finalFE != EMS_TAG_ANY){
+            if ((idx = EMSwriteIndexMap(mmapID, key))
+                < 0
+            ){
                 fprintf(stderr, "EMSreadUsingTags: Unable to allocate on read for new map index\n");
                 return false;
             }
-        } else {
-            return true;
+        }
+        else {
+            if ((idx = ems_map_key2index(emsBuf, key))
+                < 0
+            )
+                return true;
+        }
+    }
+    else {
+        idx = ems_arr_key2index(emsBuf, key);
+        if (idx < 0 || idx >= bufInt64[EMScbData(EMS_ARR_NELEM)]) {
+            fprintf(stderr, "EMSreadUsingTags: index out of bounds\n");
+            return false;
         }
     }
 
-    if (idx < 0 || idx >= bufInt64[EMScbData(EMS_ARR_NELEM)]) {
-        fprintf(stderr, "EMSreadUsingTags: index out of bounds\n");
-        return false;
-    }
+    volatile EMStag_t *bufTags = (EMStag_t *) emsBuf;
+    volatile double *bufDouble = (double *) emsBuf;
+    const char *bufChar = (const char *) emsBuf;
+    EMStag_t newTag, oldTag, memTag;
 
-    while (true) {
+    RESET_NAP_TIME()
+    WHILE_NANOTIME(timeout_ms)
+    {
         memTag.byte = bufTags[EMSdataTag(idx)].byte;
         //  Wait until FE tag is not FULL
-        if (initialFE == EMS_TAG_ANY ||
-            (initialFE != EMS_TAG_RW_LOCK && memTag.tags.fe == initialFE) ||
-            (initialFE == EMS_TAG_RW_LOCK &&
-             ((memTag.tags.fe == EMS_TAG_RW_LOCK && newTag.tags.rw < EMS_RW_NREADERS_MAX) ||
-              memTag.tags.fe == EMS_TAG_FULL) &&
-             (memTag.tags.rw < ((1 << EMS_TYPE_NBITS_RW) - 1))  // Counter is already saturated
+        if (
+                initialFE == EMS_TAG_ANY ||
+            (
+                initialFE != EMS_TAG_RW_LOCK &&
+                memTag.tags.fe == initialFE
+            ) ||
+            (
+                initialFE == EMS_TAG_RW_LOCK &&
+                (  (
+                        memTag.tags.fe == EMS_TAG_RW_LOCK &&
+                        newTag.tags.rw < EMS_RW_NREADERS_MAX
+                    ) ||
+                    memTag.tags.fe == EMS_TAG_FULL
+                ) &&
+                (
+                    memTag.tags.rw < ((1 << EMS_TYPE_NBITS_RW) - 1)
+                )  // Counter is already saturated
             )
-                ) {
+        )
+        {
             newTag.byte = memTag.byte;
             oldTag.byte = memTag.byte;
             newTag.tags.fe = EMS_TAG_BUSY;
-            if (initialFE == EMS_TAG_RW_LOCK) {
-                newTag.tags.rw++;
-            } else {
+
+            if (initialFE == EMS_TAG_RW_LOCK)
+                newTag.tags.rw++; // TODO: ??? increment in loop?
+            else
                 oldTag.tags.fe = initialFE;
-            }
+
             //  Transition FE from FULL to BUSY
             if (initialFE == EMS_TAG_ANY ||
-                __sync_bool_compare_and_swap(&(bufTags[EMSdataTag(idx)].byte), oldTag.byte, newTag.byte)) {
+                __sync_bool_compare_and_swap(
+                    &(bufTags[EMSdataTag(idx)].byte),
+                    oldTag.byte, newTag.byte
+                )
+            ){
                 // Under BUSY lock:
                 //   Read the data, then reset the FE tag, then return the original value in memory
                 newTag.tags.fe = finalFE;
                 returnValue->type  = newTag.tags.type;
-                switch (newTag.tags.type) {
+                switch (newTag.tags.type)
+                {
                     case EMS_TYPE_BOOLEAN: {
                         returnValue->value = (void *) (bufInt64[EMSdataData(idx)] != 0);
-                        if (finalFE != EMS_TAG_ANY) bufTags[EMSdataTag(idx)].byte = newTag.byte;
-                        if (EMSisMapped) bufTags[EMSmapTag(idx)].tags.fe = EMS_TAG_FULL;
+                        if (finalFE != EMS_TAG_ANY)
+                            bufTags[EMSdataTag(idx)].byte = newTag.byte;
+                        if (EMSisMapped)
+                            bufTags[EMSmapTag(idx)].tags.fe = EMS_TAG_FULL;
                         return true;
                     }
                     case EMS_TYPE_INTEGER: {
                         returnValue->value = (void *) bufInt64[EMSdataData(idx)];
-                        if (finalFE != EMS_TAG_ANY) bufTags[EMSdataTag(idx)].byte = newTag.byte;
-                        if (EMSisMapped) bufTags[EMSmapTag(idx)].tags.fe = EMS_TAG_FULL;
+                        if (finalFE != EMS_TAG_ANY)
+                            bufTags[EMSdataTag(idx)].byte = newTag.byte;
+                        if (EMSisMapped)
+                            bufTags[EMSmapTag(idx)].tags.fe = EMS_TAG_FULL;
                         return true;
                     }
                     case EMS_TYPE_FLOAT: {
                         EMSulong_double alias;
                         alias.d = bufDouble[EMSdataData(idx)];
                         returnValue->value = (void *) alias.u64;
-                        if (finalFE != EMS_TAG_ANY) bufTags[EMSdataTag(idx)].byte = newTag.byte;
-                        if (EMSisMapped) bufTags[EMSmapTag(idx)].tags.fe = EMS_TAG_FULL;
+                        if (finalFE != EMS_TAG_ANY)
+                            bufTags[EMSdataTag(idx)].byte = newTag.byte;
+                        if (EMSisMapped)
+                            bufTags[EMSmapTag(idx)].tags.fe = EMS_TAG_FULL;
                         return true;
                     }
-                    case EMS_TYPE_BUFFER:
+                    case EMS_TYPE_BUFFER: {
+                        uint32_t * heap_ptr = EMSheapPtr(bufInt64[EMSdataData(idx)]);
+                        returnValue->length = heap_ptr[0];
+                        returnValue->value = (void *)(heap_ptr + 1);
+                        if (finalFE != EMS_TAG_ANY)
+                            bufTags[EMSdataTag(idx)].byte = newTag.byte;
+                        if (EMSisMapped)
+                            bufTags[EMSmapTag(idx)].tags.fe = EMS_TAG_FULL;
+                        return true;
+                    }
                     case EMS_TYPE_JSON:
                     case EMS_TYPE_STRING: {
                         returnValue->value = (void *) EMSheapPtr(bufInt64[EMSdataData(idx)]);
                         returnValue->length = strlen((const char *)returnValue->value); // TODO:
-                        if (finalFE != EMS_TAG_ANY) bufTags[EMSdataTag(idx)].byte = newTag.byte;
-                        if (EMSisMapped) bufTags[EMSmapTag(idx)].tags.fe = EMS_TAG_FULL;
+                        if (finalFE != EMS_TAG_ANY)
+                            bufTags[EMSdataTag(idx)].byte = newTag.byte;
+                        if (EMSisMapped)
+                            bufTags[EMSmapTag(idx)].tags.fe = EMS_TAG_FULL;
                         return true;
                     }
                     case EMS_TYPE_UNDEFINED: {
                         returnValue->value = (void *) 0xcafebeef;
-                        if (finalFE != EMS_TAG_ANY) bufTags[EMSdataTag(idx)].byte = newTag.byte;
-                        if (EMSisMapped) bufTags[EMSmapTag(idx)].tags.fe = EMS_TAG_FULL;
+                        if (finalFE != EMS_TAG_ANY)
+                            bufTags[EMSdataTag(idx)].byte = newTag.byte;
+                        if (EMSisMapped)
+                            bufTags[EMSmapTag(idx)].tags.fe = EMS_TAG_FULL;
                         return true;
                     }
                     default:
                         fprintf(stderr, "EMSreadUsingTags: unknown type (%d) read from memory\n", newTag.tags.type);
                         return false;
                 }
-            } else {
+            } //else {
                 // Tag was marked BUSY between test read and CAS, must retry
-            }
-        } else {
+            //}
+        } //else {
             // Tag was already marked BUSY, must retry
-        }
+        //}
         // CAS failed or memory wasn't in initial state, wait and retry.
         // Permit preemptive map acquisition while waiting for data.
-        if (EMSisMapped) { bufTags[EMSmapTag(idx)].tags.fe = EMS_TAG_FULL; }
+        if (EMSisMapped)
+            bufTags[EMSmapTag(idx)].tags.fe = EMS_TAG_FULL;
+
         NANOSLEEP;
-        if (EMSisMapped) {
-            EMStransitionFEtag(&bufTags[EMSmapTag(idx)], NULL, EMS_TAG_FULL, EMS_TAG_BUSY, EMS_TAG_ANY);
-        }
+
+        if (EMSisMapped)
+            EMStransitionFEtag(
+                &bufTags[EMSmapTag(idx)], NULL,
+                EMS_TAG_FULL, EMS_TAG_BUSY, EMS_TAG_ANY
+            );
     }
 }
-
 
 //==================================================================
 //  Read under multiple readers-single writer lock
 bool EMSreadRW(const int mmapID, EMSvalueType *key, EMSvalueType *returnValue) {
-    return EMSreadUsingTags(mmapID, key, returnValue, EMS_TAG_RW_LOCK, EMS_TAG_RW_LOCK);
+    return EMSreadUsingTags(mmapID, key, returnValue, EMS_TAG_RW_LOCK, EMS_TAG_RW_LOCK, 0);
 }
 
 
 //==================================================================
 //  Read when full and leave empty
 bool EMSreadFE(const int mmapID, EMSvalueType *key, EMSvalueType *returnValue) {
-    return EMSreadUsingTags(mmapID, key, returnValue, EMS_TAG_FULL, EMS_TAG_EMPTY);
+    return EMSreadUsingTags(mmapID, key, returnValue, EMS_TAG_FULL, EMS_TAG_EMPTY, 0);
 }
 
 
 //==================================================================
 //  Read when full and leave Full
 bool EMSreadFF(const int mmapID, EMSvalueType *key, EMSvalueType *returnValue) {
-    return EMSreadUsingTags(mmapID, key, returnValue, EMS_TAG_FULL, EMS_TAG_FULL);
+    return EMSreadUsingTags(mmapID, key, returnValue, EMS_TAG_FULL, EMS_TAG_FULL, 0);
 }
 
 
 //==================================================================
 //   Wrapper around read
 bool EMSread(const int mmapID, EMSvalueType *key, EMSvalueType *returnValue) {
-    return EMSreadUsingTags(mmapID, key, returnValue, EMS_TAG_ANY, EMS_TAG_ANY);
+    return EMSreadUsingTags(mmapID, key, returnValue, EMS_TAG_ANY, EMS_TAG_ANY, 0);
 }
 
 
 //==================================================================
 //  Decrement the reference count of the multiple readers-single writer lock
 int EMSreleaseRW(const int mmapID, EMSvalueType *key) {
-    RESET_NAP_TIME;
+    RESET_NAP_TIME()
     void *emsBuf = emsBufs[mmapID];
     volatile int64_t *bufInt64 = (int64_t *) emsBuf;
     volatile EMStag_t *bufTags = (EMStag_t *) emsBuf;
@@ -580,10 +666,10 @@ int EMSreleaseRW(const int mmapID, EMSvalueType *key) {
 bool EMSwriteUsingTags(int mmapID,
                        EMSvalueType *key,
                        EMSvalueType *value,
-                       unsigned char initialFE,             // Block until F/E tags are this value
-                       unsigned char finalFE)               // Set the tag to this value when done
+                       unsigned char initialFE, // Block until F/E tags are this value
+                       unsigned char finalFE) // Set the tag to this value when done
 {
-    RESET_NAP_TIME;
+    RESET_NAP_TIME()
     char *emsBuf = emsBufs[mmapID];
     volatile EMStag_t *bufTags = (EMStag_t *) emsBuf;
     volatile int64_t *bufInt64 = (int64_t *) emsBuf;
@@ -595,38 +681,59 @@ bool EMSwriteUsingTags(int mmapID,
         fprintf(stderr, "EMSwriteUsingTags: index out of bounds\n");
         return false;
     }
-
     // Wait for the memory to be in the initial F/E state and transition to Busy
     if (initialFE != EMS_TAG_ANY) {
         volatile EMStag_t *maptag;
-        if (EMSisMapped) { maptag = &bufTags[EMSmapTag(idx)]; }
-        else             { maptag = NULL; }
-        EMStransitionFEtag(&bufTags[EMSdataTag(idx)], maptag,
-                           initialFE, EMS_TAG_BUSY, EMS_TAG_ANY);
+        if (EMSisMapped)
+            maptag = &bufTags[EMSmapTag(idx)];
+        else
+            maptag = NULL;
+        EMStransitionFEtag(
+            &bufTags[EMSdataTag(idx)], maptag,
+            initialFE, EMS_TAG_BUSY, EMS_TAG_ANY
+        );
     }
-
-    while (true) {
+    while (true)
+    {
         idx = idx % bufInt64[EMScbData(EMS_ARR_NELEM)];
         memTag.byte = bufTags[EMSdataTag(idx)].byte;
         //  Wait until FE tag is not BUSY
-        if (initialFE != EMS_TAG_ANY || finalFE == EMS_TAG_ANY || memTag.tags.fe != EMS_TAG_BUSY) {
+        if (
+            initialFE != EMS_TAG_ANY ||
+            finalFE == EMS_TAG_ANY ||
+            memTag.tags.fe != EMS_TAG_BUSY
+        ) {
             oldTag.byte = memTag.byte;
             newTag.byte = memTag.byte;
-            if (finalFE != EMS_TAG_ANY) newTag.tags.fe = EMS_TAG_BUSY;
+            if (finalFE != EMS_TAG_ANY)
+                newTag.tags.fe = EMS_TAG_BUSY;
             //  Transition FE from !BUSY to BUSY
-            if (initialFE != EMS_TAG_ANY || finalFE == EMS_TAG_ANY ||
-                __sync_bool_compare_and_swap(&(bufTags[EMSdataTag(idx)].byte), oldTag.byte, newTag.byte)) {
+            if (
+                initialFE != EMS_TAG_ANY ||
+                finalFE == EMS_TAG_ANY ||
+                __sync_bool_compare_and_swap(
+                    &(bufTags[EMSdataTag(idx)].byte), oldTag.byte, newTag.byte
+                )
+            ) {
                 //  If the old data was a string, free it because it will be overwritten
-                if (oldTag.tags.type == EMS_TYPE_STRING || oldTag.tags.type == EMS_TYPE_JSON || oldTag.tags.type == EMS_TYPE_BUFFER) {
+                if (
+                    oldTag.tags.type == EMS_TYPE_STRING ||
+                    oldTag.tags.type == EMS_TYPE_JSON ||
+                    oldTag.tags.type == EMS_TYPE_BUFFER
+                ) {
                     EMS_FREE(bufInt64[EMSdataData(idx)]);
                 }
 
                 // Store argument value into EMS memory
-                switch (value->type) {
-                    case EMS_TYPE_BOOLEAN:
-                        bufInt64[EMSdataData(idx)] = (int64_t) value->value;
+                switch (value->type)
+                {
+                    case EMS_TYPE_UNDEFINED:
+                        bufInt64[EMSdataData(idx)] = 0xdeadbeef;
                         break;
                     case EMS_TYPE_INTEGER:
+                        bufInt64[EMSdataData(idx)] = (int64_t) value->value;
+                        break;
+                    case EMS_TYPE_BOOLEAN:
                         bufInt64[EMSdataData(idx)] = (int64_t) value->value;
                         break;
                     case EMS_TYPE_FLOAT: {
@@ -636,11 +743,18 @@ bool EMSwriteUsingTags(int mmapID,
                     }
                         break;
                     case EMS_TYPE_BUFFER: {
+                        // LENGTH (32bit) PREFIX ENCODE
                         int64_t byteOffset;
-                        EMS_ALLOC(byteOffset, value->length, bufChar,  // TODO: NULL padding at end
+                        EMS_ALLOC(byteOffset, value->length + 8, bufChar,
                                   "EMSwriteUsingTags: out of memory to store buffer", false);
                         bufInt64[EMSdataData(idx)] = byteOffset;
-                        memcpy(EMSheapPtr(byteOffset), (const char *) value->value, value->length);
+                        uint32_t * heap_ptr = EMSheapPtr(byteOffset);
+                        heap_ptr[0] = value->length;
+                        memcpy((heap_ptr+1),
+                            (const void *) value->value,
+                            value->length
+                        );
+                        break;
                     }
                     case EMS_TYPE_JSON:
                     case EMS_TYPE_STRING: {
@@ -650,9 +764,6 @@ bool EMSwriteUsingTags(int mmapID,
                         bufInt64[EMSdataData(idx)] = textOffset;
                         strcpy(EMSheapPtr(textOffset), (const char *) value->value);
                     }
-                        break;
-                    case EMS_TYPE_UNDEFINED:
-                        bufInt64[EMSdataData(idx)] = 0xdeadbeef;
                         break;
                     default:
                         fprintf(stderr, "EMSwriteUsingTags: Unknown arg type\n");
@@ -665,19 +776,25 @@ bool EMSwriteUsingTags(int mmapID,
                     newTag.tags.rw = 0;
                 }
                 newTag.tags.type = value->type;
-                if (finalFE != EMS_TAG_ANY && bufTags[EMSdataTag(idx)].byte != oldTag.byte) {
+                if (
+                    finalFE != EMS_TAG_ANY
+                    && bufTags[EMSdataTag(idx)].byte != oldTag.byte
+                ) {
                     fprintf(stderr, "EMSwriteUsingTags: Lost tag lock while BUSY\n");
                     return false;
                 }
 
                 //  Set the tags for the data (and map, if used) back to full to finish the operation
                 bufTags[EMSdataTag(idx)].byte = newTag.byte;
-                if (EMSisMapped) bufTags[EMSmapTag(idx)].tags.fe = EMS_TAG_FULL;
+                if (EMSisMapped)
+                    bufTags[EMSmapTag(idx)].tags.fe = EMS_TAG_FULL;
                 return true;
-            } else {
+            }
+            else {
                 // Tag was marked BUSY between test read and CAS, must retry
             }
-        } else {
+        }
+        else {
             // Tag was already marked BUSY, must retry
         }
         //  Failed to set the tags, sleep and retry
@@ -721,16 +838,12 @@ bool EMSsetTag(int mmapID, EMSvalueType *key, bool is_full) {
     EMStag_t tag;
 
     int64_t idx = EMSkey2index(emsBuf, key, EMSisMapped);
-    if (idx < 0 || idx >= bufInt64[EMScbData(EMS_ARR_NELEM)]) {
+    if (idx<0 || idx >= bufInt64[EMScbData(EMS_ARR_NELEM)]) {
         return false;
     }
 
     tag.byte = bufTags[EMSdataTag(idx)].byte;
-    if (is_full) {
-        tag.tags.fe = EMS_TAG_FULL;
-    } else {
-        tag.tags.fe = EMS_TAG_EMPTY;
-    }
+    tag.tags.fe = (is_full) ? EMS_TAG_FULL : EMS_TAG_EMPTY;
     bufTags[EMSdataTag(idx)].byte = tag.byte;
     return true;
 }
@@ -822,6 +935,8 @@ bool EMSsync(int mmapID) {
 //==================================================================
 //  EMS Entry Point:   Allocate and initialize the EMS domain memory
 //
+
+// legacy api support
 int EMSinitialize(int64_t nElements,     // 0
                   size_t heapSize,      // 1
                   bool useMap,           // 2
@@ -837,27 +952,386 @@ int EMSinitialize(int64_t nElements,     // 0
                   bool pinThreads,       // 12
                   int32_t nThreads,      // 13
                   int32_t pctMLock ) {   // 14
-    int fd;
-    EMSmyID = EMSmyIDarg;
+    int32_t flags = (pctMLock & EMS_MLOCK_PCT_MASK)
+        | (((int)useMap)*EMS_USE_MAP)
+        | (((int)persist)*EMS_PERSIST)
+        | (((int)doDataFill)*EMS_FILL)
+        | (((int)doSetFEtags)*EMS_SET_E)
+        | (((int)setFEtagsFull)*EMS_FILL_JSON)
+        | (((int)pinThreads)*EMS_PIN_THREADS)
+    ;
+    // | (((int)fillIsJSON)*EMS_FILL_JSON)
+    return EMSinit(
+        nElements,
+        heapSize,
+        filename,
+        EMSmyIDarg,
+        nThreads,
+        flags,
+        fillValue
+    );
+}
 
+
+
+/*
+    ems_fill()
+
+    EMStag_t tag;
+    tag.tags.rw = 0;
+    for (int64_t idx = 0; idx < nElements; idx++)
+    {
+        tag.tags.rw = 0;
+        tag.tags.type = EMS_TYPE_UNDEFINED;
+
+        bool doDataFill = _EMS_doDataFill != 0 ;
+        size_t fillStrLen = 0;
+        if (
+            doDataFill  &&  (fillValue->type == EMS_TYPE_JSON || fillValue->type == EMS_TYPE_STRING || fillValue->type == EMS_TYPE_BUFFER)
+            )
+        {
+            fillStrLen = fillValue->length;
+        }
+
+            tag.tags.type = fillValue->type;
+            switch (tag.tags.type)
+            {
+                case EMS_TYPE_BOOLEAN:
+                case EMS_TYPE_INTEGER:
+                    bufInt64[EMSdataData(idx)] = (int64_t) fillValue->value;
+                    break;
+                case EMS_TYPE_FLOAT: {
+                    EMSulong_double alias;
+                    alias.u64 = (uint64_t) fillValue->value;
+                    bufDouble[EMSdataData(idx)] = alias.d;
+                }
+                    break;
+                case EMS_TYPE_UNDEFINED:
+                    bufInt64[EMSdataData(idx)] = 0xdeadbeef;
+                    break;
+                case EMS_TYPE_BUFFER: {
+                    int64_t byteOffset;
+                    EMS_ALLOC(byteOffset, fillStrLen, bufChar, // TODO: + 1 NULL padding
+                              "EMSinitialize: out of memory to store buffer", false);
+                    bufInt64[EMSdataData(idx)] = byteOffset;
+                    memcpy(EMSheapPtr(byteOffset), (const char *) fillValue->value, fillStrLen);
+                    // strcpy(EMSheapPtr(byteOffset), (const char *) fillValue->value);
+                }
+                case EMS_TYPE_JSON:
+                case EMS_TYPE_STRING: {
+                    int64_t textOffset;
+                    EMS_ALLOC(textOffset, fillStrLen + 1, bufChar,
+                              "EMSinitialize: out of memory to store string", false);
+                    bufInt64[EMSdataData(idx)] = textOffset;
+                    strcpy(EMSheapPtr(textOffset), (const char *) fillValue->value);
+                }
+                    break;
+                default:
+                    fprintf(stderr, "EMSinitialize: fill type is unknown\n");
+                    return -1;
+            }
+        }
+
+
+
+        if (_EMS_doSetFEtags) {
+            if (_EMS_setFEtagsFull)
+                tag.tags.fe = EMS_TAG_FULL;
+            else
+                tag.tags.fe = EMS_TAG_EMPTY;
+        }
+
+        if (_EMS_doSetFEtags || doDataFill) {
+            bufTags[EMSdataTag(idx)].byte = tag.byte;
+        }
+
+
+
+    */
+
+
+size_t            ems_await_owner(
+    const char *    path)
+{
+    static const struct
+                    timespec sleep_time =
+                    {
+                        .tv_sec = 0,
+                        .tv_nsec = 200000000
+                    };
+    struct timespec rem;
+    struct stat     st;
+                    // TODO: timeout?
+                    // TODO: if ems_id == 0 dont wait
+                    while (stat(path, &st) != 0)
+                        nanosleep(&sleep_time, &rem);
+                        // nanosleep(&sleep_time, NULL);
+                    return st.st_size;
+}
+
+
+void ems_reset_map_tags(ems_id)
+{
+    volatile int64_t *bufInt64 = (int64_t *) emsBufs[ems_id];
+    volatile EMStag_t *bufTags = (EMStag_t *) emsBufs[ems_id];
+    int64_t nElements = bufInt64[EMScbData(EMS_ARR_NELEM)];
+    for (int64_t idx = 0; idx < nElements; idx++)
+    {
+        // EMS_TAG_FULL == 0
+        bufTags[EMSmapTag(idx)].tags.fe = EMS_TAG_FULL;
+
+        // D4: not needed w/ EMS_TYPE_UNDEFINED is TYPE_0
+        //if (!useExisting)
+        //   bufTags[EMSmapTag(idx)].tags.type = EMS_TYPE_UNDEFINED;
+    }
+}
+
+static inline
+char * _ems_mmap(const char *filename, size_t filesize, int flags) {
+    int fd = open(filename,
+        O_APPEND | O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
+    if (fd < 0) {
+        perror("Error opening shared memory file -- Possibly need to be root?");
+        return -1;
+    }
+    if (flags & 1) {
+        if (ftruncate(fd, (off_t) filesize) != 0) {
+            if (errno != EINVAL) {
+                fprintf(stderr, "EMSinitialize: Error during initialization, unable to set memory size to %" PRIu64 " bytes\n",
+                        (uint64_t) filesize);
+                return -1;
+            }
+        }
+    }
+    char *emsBuf = (char *) mmap(0, filesize,
+        PROT_READ | PROT_WRITE, MAP_SHARED,
+        fd, (off_t) 0);
+    if (emsBuf == MAP_FAILED) {
+        fprintf(stderr, "EMSinitialize: Unable to map domain memory\n");
+        return -1;
+    }
+    close(fd);
+    return emsBuf;
+}
+
+static inline
+int _ems_alloc(const char *filename, size_t filesize, char *buf) {
+    int ems_id = 0;
+    while(ems_id < EMS_MAX_N_BUFS  &&  emsBufs[ems_id] != NULL)
+        ems_id++;
+    if(ems_id >= EMS_MAX_N_BUFS) {
+        fprintf(stderr, "EMSinitialize: ERROR - Unable to allocate a buffer ID/index\n");
+        return -1;
+    }
+    // register
+    emsBufs[ems_id] = buf;
+    emsBufLengths[ems_id] = filesize;
+    strncpy(emsBufFilenames[ems_id], filename, MAX_FNAME_LEN);
+    return ems_id;
+}
+
+ #define _EMS_useMap (flags & EMS_USE_MAP)
+#define _EMS_persist (flags & EMS_PERSIST)
+#define _EMS_doDataFill (flags & EMS_FILL)
+#define _EMS_fillIsJSON (flags & EMS_FILL_JSON)
+#define _EMS_doSetFEtags (flags & EMS_SET_E)
+#define _EMS_setFEtagsFull (flags & EMS_SET_F)
+#define _EMS_pinThreads (flags & EMS_PIN_THREADS)
+#define _EMS_pctMLock (flags & EMS_MLOCK_PCT_MASK)
+
+int ems_open(
+        const char *filename)
+{
+    size_t filesize = ems_await_owner(filename);
+    char *buf = _ems_mmap(filename, filesize, 0);
+    int ems_id = _ems_alloc(filename, filesize, buf);
+    return ems_id;
+}
+
+int ems_create(
+    int64_t nElements,     // 0
+    size_t heapSize,      // 1
+    const char *filename,  // 2
+    int thread_id,        // 3
+    int32_t nThreads,      // 4
+    int32_t flags,          // 5
+    EMSvalueType *fillValue// 6
+) {
+    bool useExisting = (flags & EMS_CLEAR) == 0;
+    int EMSmyID = thread_id;
+    bool doClear = !useExisting && EMSmyID == 0
+        // (
+        //     _EMS_persist || EMSmyID == 0
+        // )
+    ;
     //  Node 0 is first and always has mutual exclusion during initialization
     //  perform once-only initialization here
+    if (doClear) {
+        unlink(filename);
+        shm_unlink(filename);
+    }
+    // else if (useExisting) {
+    //     ems_await_owner(filename);
+    // }
+
+
+
+    size_t nMemBlocks = (heapSize >> EMS_MEM_BLOCKSZ_P2) + 1;
+    size_t nMemBlocksPow2 = emsNextPow2((int64_t) nMemBlocks);
+    int32_t nMemLevels = __builtin_ctzl(nMemBlocksPow2);
+    size_t bottomOfMalloc;
+    size_t filesize;
+
+    size_t bottomOfMap = (size_t)EMSdataTagWord(nElements)
+        + (size_t)EMSwordSize;
+        // Map begins 1 word AFTER the last tag word of data
+
+    bottomOfMalloc = bottomOfMap
+        + (_EMS_useMap
+            ? bottomOfMap : 0)
+    ;
+    size_t bottomOfHeap = bottomOfMalloc
+        + sizeof(struct emsMem)
+        + ((nMemBlocksPow2 << 1) - 2);
+
+    if (nElements <= 0)
+        filesize = (EMS_CB_LOCKS + nThreads) // EMS Control Block
+            * sizeof(int)
+        ;
+    else
+        filesize = bottomOfHeap
+            + (nMemBlocksPow2 << EMS_MEM_BLOCKSZ_P2);
+
+    char *emsBuf = _ems_mmap(filename, filesize, 1);
+    // TODO:
+    // if (_EMS_persist)
+    //     fd = open(filename, O_APPEND | O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
+    // else
+    //     fd = shm_open(filename, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
+
+    int pctMLock = (nElements <= 0)
+        ? 100 // lock RAM if master control block
+        : _EMS_pctMLock
+    ;
+    if (mlock((void *) emsBuf, (size_t) (filesize * (pctMLock / 100))) != 0) {
+        fprintf(stderr, "EMSinitialize NOTICE: EMS thread %d was not able to lock EMS memory to RAM for %s\n", EMSmyID, filename);
+    }
+
+    volatile int64_t *bufInt64 = (int64_t *) emsBuf;
+    volatile double *bufDouble = (double *) emsBuf;
+    char *bufChar = emsBuf;
+    volatile int *bufInt32 = (int32_t *) emsBuf;
+    volatile EMStag_t *bufTags = (EMStag_t *) emsBuf;
+
     if (EMSmyID == 0) {
-        if (!useExisting) {
-            unlink(filename);
-            shm_unlink(filename);
+        if (nElements <= 0) {   // This is the EMS CB
+            bufInt32[EMS_CB_NTHREADS] = nThreads;
+            bufInt32[EMS_CB_NBAR0] = nThreads;
+            bufInt32[EMS_CB_NBAR1] = nThreads;
+            bufInt32[EMS_CB_BARPHASE] = 0;
+            bufInt32[EMS_CB_CRITICAL] = 0;
+            bufInt32[EMS_CB_SINGLE] = 0;
+            for (int i = EMS_CB_LOCKS; i < EMS_CB_LOCKS + nThreads; i++) {
+                bufInt32[i] = EMS_TAG_BUSY;  //  Reset all locks
+            }
+        } else {   //  This is a user data domain
+            if (!useExisting) {
+                EMStag_t tag;
+                tag.tags.rw = 0;
+                tag.tags.type = EMS_TYPE_INTEGER;
+                tag.tags.fe = EMS_TAG_FULL;
+                bufInt64[EMScbData(EMS_ARR_NELEM)] = nElements;
+                bufInt64[EMScbData(EMS_ARR_HEAPSZ)] = heapSize;     // Unused?
+                bufInt64[EMScbData(EMS_ARR_Q_BOTTOM)] = 0;
+                 bufTags[EMScbTag (EMS_ARR_Q_BOTTOM)].byte = tag.byte;
+                bufInt64[EMScbData(EMS_ARR_STACKTOP)] = 0;
+                 bufTags[EMScbTag (EMS_ARR_STACKTOP)].byte = tag.byte;
+                bufInt64[EMScbData(EMS_ARR_MAPBOT)] = bottomOfMap >> EMSwordSize_pow2; // / EMSwordSize;
+                bufInt64[EMScbData(EMS_ARR_MALLOCBOT)] = bottomOfMalloc;
+                bufInt64[EMScbData(EMS_ARR_HEAPBOT)] = bottomOfHeap;
+                bufInt64[EMScbData(EMS_ARR_MEM_MUTEX)] = EMS_TAG_EMPTY;
+                bufInt64[EMScbData(EMS_ARR_FILESZ)] = filesize;
+
+                struct emsMem *emsMemBuffer = (struct emsMem *)
+                    &bufChar[bufInt64[EMScbData(EMS_ARR_MALLOCBOT)]];
+                emsMemBuffer->level = nMemLevels;
+            }
         }
     }
 
-    if (useExisting) {
+    #if defined(__linux)
+    if (_EMS_pinThreads) {
+        cpu_set_t cpuset;
+        CPU_ZERO(&cpuset);
+        CPU_SET((EMSmyID % nThreads), &cpuset);  // Round-robin over-subscribed systems
+        sched_setaffinity(0, sizeof(cpu_set_t), &cpuset);
+    }
+    #endif
+
+    int ems_id = _ems_alloc(filename, filesize, emsBuf);
+    if (ems_id < 0)
+        return -1;
+
+    // if (EMSmyID == 0 && _EMS_useMap && useExisting)
+    //     ems_reset_map_tags(ems_id);
+
+    return ems_id;
+}
+
+void ems_init()
+{
+
+}
+
+/*
+int __EMSinit(
+    int64_t nElements,     // 0
+    size_t heapSize,      // 1
+    const char *filename,  // 2
+    int thread_id,        // 3
+    int32_t nThreads,      // 4
+    int32_t flags,          // 5
+    EMSvalueType *fillValue// 6
+) {
+    bool useExisting = (flags & EMS_CLEAR) == 0;
+
+    int fd;
+    int EMSmyID = thread_id;
+
+    bool doClear = !useExisting &&
+        (
+            _EMS_persist || EMSmyID == 0
+        )
+    ;
+    //  Node 0 is first and always has mutual exclusion during initialization
+    //  perform once-only initialization here
+    // if (EMSmyID == 0) {
+    //     if (!useExisting) {
+    //         unlink(filename);
+    //         shm_unlink(filename);
+    //     }
+    // }
+
+    if (doClear) {
+        unlink(filename);
+        shm_unlink(filename);
+    }
+    else if (useExisting) {
         struct timespec sleep_time;
         sleep_time.tv_sec = 0;
         sleep_time.tv_nsec = 200000000;
         struct stat statbuf;
         while (stat(filename, &statbuf) != 0) nanosleep(&sleep_time, NULL); // TODO: timeout?
     }
+    // if (useExisting) {
+    //     struct timespec sleep_time;
+    //     sleep_time.tv_sec = 0;
+    //     sleep_time.tv_nsec = 200000000;
+    //     struct stat statbuf;
+    //     while (stat(filename, &statbuf) != 0) nanosleep(&sleep_time, NULL); // TODO: timeout?
+    // }
 
-    if (persist)
+    if (_EMS_persist)
         fd = open(filename, O_APPEND | O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
     else
         fd = shm_open(filename, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
@@ -874,20 +1348,24 @@ int EMSinitialize(int64_t nElements,     // 0
     size_t filesize;
 
     size_t bottomOfMap = (size_t)EMSdataTagWord(nElements) + (size_t)EMSwordSize;  // Map begins 1 word AFTER the last tag word of data
-    if (useMap) {
+    if (_EMS_useMap) {
         bottomOfMalloc = bottomOfMap + bottomOfMap;
     } else {
         bottomOfMalloc = bottomOfMap;
     }
-    size_t bottomOfHeap = bottomOfMalloc + sizeof(struct emsMem) + (nMemBlocksPow2 * 2 - 2);
+    size_t bottomOfHeap  = bottomOfMalloc
+        + sizeof(struct emsMem)
+        + ((nMemBlocksPow2 << 1) - 2);
 
     if (nElements <= 0) {
         filesize = EMS_CB_LOCKS + nThreads;   // EMS Control Block
         filesize *= sizeof(int);
-    } else {
-        filesize = bottomOfHeap + (nMemBlocksPow2 * EMS_MEM_BLOCKSZ);
     }
-    if (ftruncate(fd, (off_t) filesize) != 0) {
+    else
+        filesize = bottomOfHeap + (nMemBlocksPow2 * EMS_MEM_BLOCKSZ);
+
+    if (ftruncate(fd, (off_t) filesize) != 0)
+    {
         if (errno != EINVAL) {
             fprintf(stderr, "EMSinitialize: Error during initialization, unable to set memory size to %" PRIu64 " bytes\n",
                     (uint64_t) filesize);
@@ -902,7 +1380,10 @@ int EMSinitialize(int64_t nElements,     // 0
     }
     close(fd);
 
-    if (nElements <= 0) pctMLock = 100;   // lock RAM if master control block
+    int pctMLock = (nElements <= 0)
+        ? 100 // lock RAM if master control block
+        : _EMS_pctMLock
+    ;
     if (mlock((void *) emsBuf, (size_t) (filesize * (pctMLock / 100))) != 0) {
         fprintf(stderr, "EMSinitialize NOTICE: EMS thread %d was not able to lock EMS memory to RAM for %s\n", EMSmyID, filename);
     } else {
@@ -949,29 +1430,37 @@ int EMSinitialize(int64_t nElements,     // 0
         }
     }
 
-    if (pinThreads) {
 #if defined(__linux)
+    if (_EMS_pinThreads) {
         cpu_set_t cpuset;
         CPU_ZERO(&cpuset);
         CPU_SET((EMSmyID % nThreads), &cpuset);  // Round-robin over-subscribed systems
         sched_setaffinity(0, sizeof(cpu_set_t), &cpuset);
-#endif
     }
+#endif
     EMStag_t tag;
     tag.tags.rw = 0;
     int64_t iterPerThread = (nElements / nThreads) + 1;
     int64_t startIter = iterPerThread * EMSmyID;
     int64_t endIter = iterPerThread * (EMSmyID + 1);
     size_t fillStrLen = 0;
-    if (doDataFill  &&  (fillValue->type == EMS_TYPE_JSON || fillValue->type == EMS_TYPE_STRING || fillValue->type == EMS_TYPE_BUFFER)) {
+    bool doDataFill = _EMS_doDataFill != 0 ;
+    if (
+        doDataFill  &&  (fillValue->type == EMS_TYPE_JSON || fillValue->type == EMS_TYPE_STRING || fillValue->type == EMS_TYPE_BUFFER)
+        )
+    {
         fillStrLen = fillValue->length;
     }
-    if (endIter > nElements) endIter = nElements;
-    for (int64_t idx = startIter; idx < endIter; idx++) {
+    if (endIter > nElements)
+        endIter = nElements;
+    for (int64_t idx = startIter; idx < endIter; idx++)
+    {
         tag.tags.rw = 0;
-        if (doDataFill) {
+        if (doDataFill)
+        {
             tag.tags.type = fillValue->type;
-            switch (tag.tags.type) {
+            switch (tag.tags.type)
+            {
                 case EMS_TYPE_BOOLEAN:
                 case EMS_TYPE_INTEGER:
                     bufInt64[EMSdataData(idx)] = (int64_t) fillValue->value;
@@ -1006,36 +1495,86 @@ int EMSinitialize(int64_t nElements,     // 0
                     fprintf(stderr, "EMSinitialize: fill type is unknown\n");
                     return -1;
             }
-        } else {
+        }
+        else {
             tag.tags.type = EMS_TYPE_UNDEFINED;
         }
 
-        if (doSetFEtags) {
-            if (setFEtagsFull) tag.tags.fe = EMS_TAG_FULL;
-            else tag.tags.fe = EMS_TAG_EMPTY;
+        if (_EMS_doSetFEtags) {
+            if (_EMS_setFEtagsFull)
+                tag.tags.fe = EMS_TAG_FULL;
+            else
+                tag.tags.fe = EMS_TAG_EMPTY;
         }
 
-        if (doSetFEtags || doDataFill) {
+        if (_EMS_doSetFEtags || doDataFill) {
             bufTags[EMSdataTag(idx)].byte = tag.byte;
         }
 
-        if (useMap) {
+        if (_EMS_useMap) {
             bufTags[EMSmapTag(idx)].tags.fe = EMS_TAG_FULL;
-            if (!useExisting) { bufTags[EMSmapTag(idx)].tags.type = EMS_TYPE_UNDEFINED; }
+            if (!useExisting)
+                bufTags[EMSmapTag(idx)].tags.type = EMS_TYPE_UNDEFINED;
         }
     }
 
-    int emsBufN = 0;
-    while(emsBufN < EMS_MAX_N_BUFS  &&  emsBufs[emsBufN] != NULL)  emsBufN++;
-    if(emsBufN < EMS_MAX_N_BUFS) {
-        emsBufs[emsBufN] = emsBuf;
-        emsBufLengths[emsBufN] = filesize;
-        strncpy(emsBufFilenames[emsBufN], filename, MAX_FNAME_LEN);
-    } else {
+    int ems_id = 0;
+    while(ems_id < EMS_MAX_N_BUFS  &&  emsBufs[ems_id] != NULL)
+        ems_id++;
+    if(ems_id < EMS_MAX_N_BUFS)
+    {
+        emsBufs[ems_id] = emsBuf;
+        emsBufLengths[ems_id] = filesize;
+        strncpy(emsBufFilenames[ems_id], filename, MAX_FNAME_LEN);
+    }
+    else
+    {
         fprintf(stderr, "EMSinitialize: ERROR - Unable to allocate a buffer ID/index\n");
-        emsBufN = -1;
+        ems_id = -1;
     }
 
-    return emsBufN;
+    return ems_id;
 }
+*/
 
+#undef _EMS_useMap
+#undef _EMS_persist
+#undef _EMS_doDataFill
+#undef _EMS_fillIsJSON
+#undef _EMS_doSetFEtags
+#undef _EMS_setFEtagsFull
+#undef _EMS_pinThreads
+#undef _EMS_pctMLock
+
+
+/*-----------------------------------------------------------------------------+
+ |  Extended Memory Semantics (EMS)                            Version 1.4.0   |
+ |  Synthetic Semantics       http://www.synsem.com/       mogill@synsem.com   |
+ +-----------------------------------------------------------------------------+
+ |  Copyright (c) 2011-2014, Synthetic Semantics LLC.  All rights reserved.    |
+ |  Copyright (c) 2015-2016, Jace A Mogill.  All rights reserved.              |
+ |                                                                             |
+ | Redistribution and use in source and binary forms, with or without          |
+ | modification, are permitted provided that the following conditions are met: |
+ |    * Redistributions of source code must retain the above copyright         |
+ |      notice, this list of conditions and the following disclaimer.          |
+ |    * Redistributions in binary form must reproduce the above copyright      |
+ |      notice, this list of conditions and the following disclaimer in the    |
+ |      documentation and/or other materials provided with the distribution.   |
+ |    * Neither the name of the Synthetic Semantics nor the names of its       |
+ |      contributors may be used to endorse or promote products derived        |
+ |      from this software without specific prior written permission.          |
+ |                                                                             |
+ |    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS      |
+ |    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT        |
+ |    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR    |
+ |    A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL SYNTHETIC         |
+ |    SEMANTICS LLC BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,   |
+ |    EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,      |
+ |    PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR       |
+ |    PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF   |
+ |    LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING     |
+ |    NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS       |
+ |    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.             |
+ |                                                                             |
+ +-----------------------------------------------------------------------------*/

@@ -40,35 +40,35 @@ int64_t EMShashString(const char *key);
 
 // ---------------------------------------------------------------------------------
 //  External API functions
-extern "C" int EMScriticalEnter(int mmapID, int timeout);
-extern "C" bool EMScriticalExit(int mmapID);
-extern "C" int EMSbarrier(int mmapID, int timeout);
-extern "C" bool EMSsingleTask(int mmapID);
-extern "C" bool EMScas(int mmapID, EMSvalueType *key,
+int EMScriticalEnter(int mmapID, int timeout);
+bool EMScriticalExit(int mmapID);
+int EMSbarrier(int mmapID, int timeout);
+bool EMSsingleTask(int mmapID);
+bool EMScas(int mmapID, EMSvalueType *key,
             EMSvalueType *oldValue, EMSvalueType *newValue,
             EMSvalueType *returnValue);
-extern "C" bool EMSfaa(int mmapID, EMSvalueType *key, EMSvalueType *value, EMSvalueType *returnValue);
-extern "C" int EMSpush(int mmapID, EMSvalueType *value);
-extern "C" bool EMSpop(int mmapID, EMSvalueType *returnValue);
-extern "C" int EMSenqueue(int mmapID, EMSvalueType *value);
-extern "C" bool EMSdequeue(int mmapID, EMSvalueType *returnValue);
-extern "C" bool EMSloopInit(int mmapID, int32_t start, int32_t end, int32_t minChunk, int schedule_mode);
-extern "C" bool EMSloopChunk(int mmapID, int32_t *start, int32_t *end);
-extern "C" unsigned char EMStransitionFEtag(EMStag_t volatile *tag, EMStag_t volatile *mapTag, unsigned char oldFE, unsigned char newFE, unsigned char oldType);
-extern "C" bool EMSreadRW(const int mmapID, EMSvalueType *key, EMSvalueType *returnValue);
-extern "C" bool EMSreadFF(const int mmapID, EMSvalueType *key, EMSvalueType *returnValue);
-extern "C" bool EMSreadFE(const int mmapID, EMSvalueType *key, EMSvalueType *returnValue);
-extern "C" bool EMSread(const int mmapID, EMSvalueType *key, EMSvalueType *returnValue);
-extern "C" int EMSreleaseRW(const int mmapID, EMSvalueType *key);
-extern "C" bool EMSwriteXF(int mmapID, EMSvalueType *key, EMSvalueType *value);
-extern "C" bool EMSwriteXE(int mmapID, EMSvalueType *key, EMSvalueType *value);
-extern "C" bool EMSwriteEF(int mmapID, EMSvalueType *key, EMSvalueType *value);
-extern "C" bool EMSwrite(int mmapID, EMSvalueType *key, EMSvalueType *value);
-extern "C" bool EMSsetTag(int mmapID, EMSvalueType *key, bool is_full);
-extern "C" bool EMSdestroy(int mmapID, bool do_unlink);
-extern "C" bool EMSindex2key(int mmapID, int64_t idx, EMSvalueType *key);
-extern "C" bool EMSsync(int mmapID);
-extern "C" int EMSinitialize(int64_t nElements,     // 0
+bool EMSfaa(int mmapID, EMSvalueType *key, EMSvalueType *value, EMSvalueType *returnValue);
+int EMSpush(int mmapID, EMSvalueType *value);
+bool EMSpop(int mmapID, EMSvalueType *returnValue);
+int EMSenqueue(int mmapID, EMSvalueType *value);
+bool EMSdequeue(int mmapID, EMSvalueType *returnValue);
+bool EMSloopInit(int mmapID, int32_t start, int32_t end, int32_t minChunk, int schedule_mode);
+bool EMSloopChunk(int mmapID, int32_t *start, int32_t *end);
+unsigned char EMStransitionFEtag(EMStag_t volatile *tag, EMStag_t volatile *mapTag, unsigned char oldFE, unsigned char newFE, unsigned char oldType);
+bool EMSreadRW(const int mmapID, EMSvalueType *key, EMSvalueType *returnValue);
+bool EMSreadFF(const int mmapID, EMSvalueType *key, EMSvalueType *returnValue);
+bool EMSreadFE(const int mmapID, EMSvalueType *key, EMSvalueType *returnValue);
+bool EMSread(const int mmapID, EMSvalueType *key, EMSvalueType *returnValue);
+int EMSreleaseRW(const int mmapID, EMSvalueType *key);
+bool EMSwriteXF(int mmapID, EMSvalueType *key, EMSvalueType *value);
+bool EMSwriteXE(int mmapID, EMSvalueType *key, EMSvalueType *value);
+bool EMSwriteEF(int mmapID, EMSvalueType *key, EMSvalueType *value);
+bool EMSwrite(int mmapID, EMSvalueType *key, EMSvalueType *value);
+bool EMSsetTag(int mmapID, EMSvalueType *key, bool is_full);
+bool EMSdestroy(int mmapID, bool do_unlink);
+bool EMSindex2key(int mmapID, int64_t idx, EMSvalueType *key);
+bool EMSsync(int mmapID);
+int EMSinitialize(int64_t nElements,     // 0
                   size_t heapSize,        // 1
                   bool useMap,            // 2
                   const char *filename,   // 3
@@ -83,3 +83,14 @@ extern "C" int EMSinitialize(int64_t nElements,     // 0
                   bool pinThreads,        // 12
                   int32_t nThreads,       // 13
                   int32_t pctMLock );     // 14
+
+int ems_open(const char *filename);
+int ems_create(
+    int64_t nElements,     // 0
+    size_t heapSize,      // 1
+    const char *filename,  // 2
+    int thread_id,        // 3
+    int32_t nThreads,      // 4
+    int32_t flags,          // 5
+    EMSvalueType *fillValue// 6
+);

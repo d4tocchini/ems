@@ -57,7 +57,7 @@ bool EMSsingleTask(int mmapID) {
 //  Critical Region Entry --  1 thread at a time passes this barrier
 //
 int EMScriticalEnter(int mmapID, int timeout) {
-    RESET_NAP_TIME;
+    RESET_NAP_TIME()
     void *emsBuf = emsBufs[mmapID];
     int32_t *bufInt32 = (int32_t *) emsBuf;
 
@@ -108,7 +108,7 @@ int EMSbarrier(int mmapID, int timeout) {
         bufInt32[EMS_CB_BARPHASE] = !barPhase;
     } else {
         //  Wait for the barrier phase to change, indicating the last thread arrived
-        RESET_NAP_TIME;
+        RESET_NAP_TIME()
         while (timeout > 0  &&  barPhase == bufInt32[EMS_CB_BARPHASE]) {
             NANOSLEEP;
             timeout -= 1;

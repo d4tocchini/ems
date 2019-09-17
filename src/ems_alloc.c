@@ -46,9 +46,9 @@
 struct emsMem *emsMem_new(int level) {
     size_t size = 1UL << level;
     printf("emsMem_new: malloc sz=%ld\n", size);
-    struct emsMem *self = (struct emsMem *) malloc(sizeof(struct emsMem) + sizeof(uint8_t) * (size * 2 - 2));
+    struct emsMem *self = (struct emsMem *) malloc(sizeof(struct emsMem) + sizeof(uint8_t) * ((size << 1) - 2));
     self->level = level;
-    memset(self->tree, BUDDY_UNUSED, size * 2 - 1);
+    memset(self->tree, BUDDY_UNUSED, (size << 1) - 1);
     return self;
 }
 
@@ -78,9 +78,9 @@ static inline int64_t EMS_index_offset(int64_t index, int32_t level, int64_t max
 //  Mark the parent buddy of this buddy
 static void EMS_mark_parent(struct emsMem *self, int64_t index) {
     for (; ;) {
-        int64_t buddy = index - 1 + (index & 1) * 2;
+        int64_t buddy = index - 1 + ((index & 1) << 1);
         if (buddy > 0 && (self->tree[buddy] == BUDDY_USED || self->tree[buddy] == BUDDY_FULL)) {
-            index = (index + 1) / 2 - 1;
+            index = ((index + 1) >> 1) - 1;
             self->tree[index] = BUDDY_FULL;
         } else {
             return;
@@ -93,22 +93,30 @@ static void EMS_mark_parent(struct emsMem *self, int64_t index) {
 //  Allocate new memory from the EMS heap
 size_t emsMem_alloc(struct emsMem *self, size_t bytesRequested) {
     size_t size;
-    size = emsNextPow2((bytesRequested + (EMS_MEM_BLOCKSZ - 1)) / EMS_MEM_BLOCKSZ);
-    if (size == 0) size++;
+    size = emsNextPow2(
+        (bytesRequested + (EMS_MEM_BLOCKSZ - 1)) >> EMS_MEM_BLOCKSZ_P2);
+    if (size == 0)
+        size++;
     size_t length = 1UL << self->level;
 
     //  fprintf(stderr, "emsMem_alloc: self=%x   size=%ld   s=%ld    len=%ld\n", self, size, s, length);
-    if (size > length) return -1;
+
+    if (size > length)
+        return -1;
 
     int64_t index = 0;
     int32_t level = 0;
 
-    while (index >= 0) {
+    while (index >= 0)
+    {
         if (size == length) {
             if (self->tree[index] == BUDDY_UNUSED) {
                 self->tree[index] = BUDDY_USED;
                 EMS_mark_parent(self, index);
-                return ((size_t)EMS_index_offset(index, level, self->level) * EMS_MEM_BLOCKSZ);
+                return (
+                    ((size_t)EMS_index_offset(index, level, self->level))
+                    << EMS_MEM_BLOCKSZ_P2
+                );
             }
         } else {
             // size < length
@@ -119,11 +127,11 @@ size_t emsMem_alloc(struct emsMem *self, size_t bytesRequested) {
                 case BUDDY_UNUSED:
                     // split first
                     self->tree[index] = BUDDY_SPLIT;
-                    self->tree[index * 2 + 1] = BUDDY_UNUSED;
-                    self->tree[index * 2 + 2] = BUDDY_UNUSED;
+                    self->tree[(index << 1) + 1] = BUDDY_UNUSED;
+                    self->tree[(index << 1) + 2] = BUDDY_UNUSED;
                 default:
-                    index = index * 2 + 1;
-                    length /= 2;
+                    index = (index << 1) + 1;
+                    length = (length >> 1);
                     level++;
                     continue;
             }
@@ -134,8 +142,8 @@ size_t emsMem_alloc(struct emsMem *self, size_t bytesRequested) {
         }
         for (; ;) {
             level--;
-            length *= 2;
-            index = (index + 1) / 2 - 1;
+            length = (length << 1);
+            index = ((index + 1) >> 1) - 1;
             if (index < 0)
                 return -1;
             if (index & 1) {
@@ -153,15 +161,15 @@ size_t emsMem_alloc(struct emsMem *self, size_t bytesRequested) {
 //  Combine two buddies into one node
 static void EMS_combine(struct emsMem *self, int64_t index) {
     for (; ;) {
-        int64_t buddy = index - 1 + (index & 1) * 2;
+        int64_t buddy = index - 1 + ((index & 1) << 1);
         if (buddy < 0 || self->tree[buddy] != BUDDY_UNUSED) {
             self->tree[index] = BUDDY_UNUSED;
-            while (((index = (index + 1) / 2 - 1) >= 0) && self->tree[index] == BUDDY_FULL) {
+            while (((index = ((index + 1) >> 1) - 1) >= 0) && self->tree[index] == BUDDY_FULL) {
                 self->tree[index] = BUDDY_SPLIT;
             }
             return;
         }
-        index = (index + 1) / 2 - 1;
+        index = ((index + 1) >> 1) - 1;
     }
 }
 
@@ -185,12 +193,12 @@ void emsMem_free(struct emsMem *self, size_t offset) {
                 assert(0);
                 return;
             default:
-                length /= 2;
+                length = length >> 1;
                 if (offset < left + length) {
-                    index = index * 2 + 1;
+                    index = (index << 1) + 1;
                 } else {
                     left += length;
-                    index = index * 2 + 2;
+                    index = (index << 1) + 2;
                 }
                 break;
         }
@@ -210,17 +218,17 @@ size_t emsMem_size(struct emsMem *self, size_t offset) {
         switch (self->tree[index]) {
             case BUDDY_USED:
                 assert(offset == left);
-                return length * EMS_MEM_BLOCKSZ;
+                return length << EMS_MEM_BLOCKSZ_P2;
             case BUDDY_UNUSED:
                 assert(0);
-                return length * EMS_MEM_BLOCKSZ;
+                return length << EMS_MEM_BLOCKSZ_P2;
             default:
-                length /= 2;
+                length = length >> 1;
                 if (offset < left + length) {
-                    index = index * 2 + 1;
+                    index = (index << 1) + 1;
                 } else {
                     left += length;
-                    index = index * 2 + 2;
+                    index = (index << 1) + 2;
                 }
                 break;
         }

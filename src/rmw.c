@@ -34,7 +34,12 @@
 //==================================================================
 //  Fetch and Add Atomic Memory Operation
 //  Returns a+b where a is data in EMS memory and b is an argument
-bool EMSfaa(int mmapID, EMSvalueType *key, EMSvalueType *value, EMSvalueType *returnValue) {
+bool EMSfaa(
+    int mmapID,
+    EMSvalueType *key,
+    EMSvalueType *value,
+    EMSvalueType *returnValue)
+{
     void *emsBuf = emsBufs[mmapID];
     volatile EMStag_t *bufTags = (EMStag_t *) emsBuf;
     int64_t idx = EMSwriteIndexMap(mmapID, key);
