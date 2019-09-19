@@ -83,7 +83,7 @@ inline int64_t ems_arr_hash2index(int64_t *bufInt64, int64_t hash) {
     return hash % bufInt64[EMScbData(EMS_ARR_NELEM)];
 }
 
-int64_t ems_map_hash2index(void *emsBuf, EMSvalueType *key, int64_t idx)
+int64_t ems_map_hash2index(void *emsBuf, EMSvalueType *key, int64_t idx, int64_t * timer)
 {
     volatile EMStag_t *bufTags = (EMStag_t *) emsBuf;
     volatile int64_t *bufInt64 = (int64_t *) emsBuf;
@@ -98,7 +98,13 @@ int64_t ems_map_hash2index(void *emsBuf, EMSvalueType *key, int64_t idx)
     {
         idx = idx % bufInt64[EMScbData(EMS_ARR_NELEM)];
         // Wait until the map key is FULL, mark it busy while map lookup is performed
-        mapTags.byte = EMStransitionFEtag(&bufTags[EMSmapTag(idx)], NULL, EMS_TAG_FULL, EMS_TAG_BUSY, EMS_TAG_ANY);
+        mapTags.byte = EMStransitionFEtag(
+            &bufTags[EMSmapTag(idx)], NULL,
+            EMS_TAG_FULL, EMS_TAG_BUSY, EMS_TAG_ANY,
+            timer);
+        if (NANO_DID_TIMEOUT(timer)) {
+            return -1;
+        }
         if (mapTags.tags.type == key->type)
         {
             switch (key->type)
@@ -152,18 +158,19 @@ int64_t ems_map_hash2index(void *emsBuf, EMSvalueType *key, int64_t idx)
     return idx % bufInt64[EMScbData(EMS_ARR_NELEM)];
 }
 
-
-#define EMSkey2index(emsBuf, key, is_mapped)\
-    ((is_mapped) ? ems_map_key2index((emsBuf), (key)) : ems_arr_key2index((emsBuf), (key)))
+// TODO: handle timer in EMSkey2index
+#define EMSkey2index(emsBuf, key, is_mapped) ((is_mapped)\
+    ? ems_map_key2index((emsBuf), (key), NULL)\
+    : ems_arr_key2index((emsBuf), (key)))
 
 int64_t ems_arr_key2index(int64_t *bufInt64, EMSvalueType *key) {
     // int64_t idx = ems_key2hash(key);
     return ems_arr_hash2index(bufInt64, ems_key2hash(key));
 }
 
-int64_t ems_map_key2index(void *emsBuf, EMSvalueType *key)
+int64_t ems_map_key2index(void *emsBuf, EMSvalueType *key, int64_t * timer)
 {
-    return ems_map_hash2index(emsBuf, key, ems_key2hash(key));
+    return ems_map_hash2index(emsBuf, key, ems_key2hash(key), timer);
 }
 
 
@@ -201,16 +208,17 @@ static void EMSarrFinalize(char *data, void *hint) {
 
 //==================================================================
 //  Wait until the FE tag is a particular state, then transition it to the new state
-//  Return new tag state
+//  Return new tag state, old tag state if timed out
 //
 unsigned char EMStransitionFEtag(
     EMStag_t volatile *tag,
     EMStag_t volatile *mapTag,
     unsigned char oldFE,
     unsigned char newFE,
-    unsigned char oldType)
+    unsigned char oldType,
+    int64_t *timer)
 {
-    RESET_NAP_TIME()
+    NANO_SET_TIMEOUT(timer)
     EMStag_t oldTag;           //  Desired tag value to start of the transition
     EMStag_t newTag;           //  Tag value at the end of the transition
     EMStag_t volatile memTag;  //  Tag value actually stored in memory
@@ -231,15 +239,21 @@ unsigned char EMStransitionFEtag(
         if (memTag.byte == oldTag.byte)
             return (newTag.byte);
 
-        // else Allow preemptive map acquisition while waiting for data
-        if (mapTag)
+        if (mapTag) {
+            // else Allow preemptive map acquisition while waiting for data
             mapTag->tags.fe = EMS_TAG_FULL;
 
-        NANOSLEEP;
+            NANO_TIMEOUT_SLEEP_CATCH        { return tag->byte; }
 
-        if (mapTag)
-            EMStransitionFEtag(mapTag, NULL,
-                EMS_TAG_FULL, EMS_TAG_BUSY, EMS_TAG_ANY);
+            EMStransitionFEtag(
+                mapTag, NULL,
+                EMS_TAG_FULL, EMS_TAG_BUSY, EMS_TAG_ANY,
+                timer);
+            if (NANO_DID_TIMEOUT(timer))    { return tag->byte; }
+        }
+        else {
+            NANO_TIMEOUT_SLEEP_CATCH        { return tag->byte; }
+        }
 
         // Re-load tag in case was transitioned by another thread
         memTag.byte = tag->byte;
@@ -273,29 +287,31 @@ int64_t EMShashString(const char *key) {
 //  match, the map key is left empty and this function
 //  returns the index of an existing or available array element.
 //
-int64_t EMSwriteIndexMap(const int mmapID, EMSvalueType *key)
+int64_t EMSwriteIndexMap(const int mmapID, EMSvalueType *key, int64_t * timer)
 {
     char *emsBuf = emsBufs[mmapID];
     volatile int64_t  *bufInt64  = (int64_t *) emsBuf;
 
-    bool is_mapped = EMSisMapped;
-
     int64_t hash = ems_key2hash(key);
-    int64_t idx = (is_mapped)
-        ?   ems_map_hash2index(emsBuf, key, hash)
-        :   ems_arr_hash2index(bufInt64, hash)
-    ;
-    //  If the key already exists, use it
-    if (idx > 0)
-        return idx;
-        // fprintf(stderr, "write index map -- key already existed\n");
-    if (!is_mapped) {
+    int64_t idx;
+
+    if (!EMSisMapped) {
+        idx = ems_arr_hash2index(bufInt64, hash);
         if (idx < 0 || idx >= bufInt64[EMScbData(EMS_ARR_NELEM)]) {
             fprintf(stderr, "Wasn't mapped do bounds check\n");
             return -1;
         }
+        return idx;
     }
     else {
+        idx = ems_map_hash2index(emsBuf, key, hash, timer);
+         //  If the key already exists, use it
+        if (idx > 0)
+            return idx;
+        if (NANO_DID_TIMEOUT(timer)) {
+            return -1;
+        }
+
         idx = ems_arr_hash2index(bufInt64, hash); // ...
 
         volatile char     *bufChar   = emsBuf;
@@ -308,7 +324,11 @@ int64_t EMSwriteIndexMap(const int mmapID, EMSvalueType *key)
             // Wait until the map key is FULL, mark it busy while map lookup is performed
             mapTags.byte = EMStransitionFEtag(
                 &bufTags[EMSmapTag(idx)], NULL,
-                EMS_TAG_FULL, EMS_TAG_BUSY, EMS_TAG_ANY);
+                EMS_TAG_FULL, EMS_TAG_BUSY, EMS_TAG_ANY,
+                timer);
+            if (NANO_DID_TIMEOUT(timer)) {
+                return -1;
+            }
 
             mapTags.tags.fe = EMS_TAG_FULL;  // When written back, mark FULL
 
@@ -414,13 +434,15 @@ bool EMSreadUsingTags(const int mmapID,
                       EMSvalueType *returnValue,
                       unsigned char initialFE, // Block until F/E tags are this value
                       unsigned char finalFE, // Set the tag to this value when done
-                      int64_t timeout_ms) // default = 0 = forever
+                      int64_t* timer) // default = 0 = forever
 {
+    NANO_SET_TIMEOUT(timer)
+
     void *emsBuf = emsBufs[mmapID];
     volatile int64_t *bufInt64 = (int64_t *) emsBuf;
 
     returnValue->type  = EMS_TYPE_UNDEFINED;
-    returnValue->value = (void *) 0xdeafbeef;  // TODO: Should return default value even when not doing write allocate
+    // returnValue->value = (void *) 0xdeafbeef;  // TODO: Should return default value even when not doing write allocate
 
     int64_t idx;
     bool is_mapped = EMSisMapped;
@@ -432,18 +454,27 @@ bool EMSreadUsingTags(const int mmapID,
         //  then allocate the undefined object and set the state.  If the state is
         //  not changing, do not allocate the undefined element.
         if (finalFE != EMS_TAG_ANY){
-            if ((idx = EMSwriteIndexMap(mmapID, key))
-                < 0
-            ){
+            if ((idx = EMSwriteIndexMap(mmapID, key,
+                timer)) < 0)
+            {
+                if (NANO_DID_TIMEOUT(timer)) {
+                    // printf("******** EMSwriteIndexMap NANO_DID_TIMEOUT %lli \n", timer ? *timer : 0ll);
+                     return false;
+                }
                 fprintf(stderr, "EMSreadUsingTags: Unable to allocate on read for new map index\n");
                 return false;
             }
         }
         else {
-            if ((idx = ems_map_key2index(emsBuf, key))
-                < 0
-            )
+            if ((idx = ems_map_key2index(emsBuf, key,
+                timer)) < 0)
+            {
+                if (NANO_DID_TIMEOUT(timer)) {
+                    // printf("******** ems_map_key2index NANO_DID_TIMEOUT %lli \n", timer ? *timer : 0ll);
+                    return false;
+                }
                 return true;
+            }
         }
     }
     else {
@@ -459,8 +490,7 @@ bool EMSreadUsingTags(const int mmapID,
     const char *bufChar = (const char *) emsBuf;
     EMStag_t newTag, oldTag, memTag;
 
-    RESET_NAP_TIME()
-    WHILE_NANOTIME(timeout_ms)
+    while(true)
     {
         memTag.byte = bufTags[EMSdataTag(idx)].byte;
         //  Wait until FE tag is not FULL
@@ -503,9 +533,18 @@ bool EMSreadUsingTags(const int mmapID,
                 // Under BUSY lock:
                 //   Read the data, then reset the FE tag, then return the original value in memory
                 newTag.tags.fe = finalFE;
+                returnValue->length = 0;
                 returnValue->type  = newTag.tags.type;
                 switch (newTag.tags.type)
                 {
+                    case EMS_TYPE_UNDEFINED: {
+                        returnValue->value = (void *) 0xcafebeef;
+                        if (finalFE != EMS_TAG_ANY)
+                            bufTags[EMSdataTag(idx)].byte = newTag.byte;
+                        if (EMSisMapped)
+                            bufTags[EMSmapTag(idx)].tags.fe = EMS_TAG_FULL;
+                        return true;
+                    }
                     case EMS_TYPE_BOOLEAN: {
                         returnValue->value = (void *) (bufInt64[EMSdataData(idx)] != 0);
                         if (finalFE != EMS_TAG_ANY)
@@ -552,14 +591,6 @@ bool EMSreadUsingTags(const int mmapID,
                             bufTags[EMSmapTag(idx)].tags.fe = EMS_TAG_FULL;
                         return true;
                     }
-                    case EMS_TYPE_UNDEFINED: {
-                        returnValue->value = (void *) 0xcafebeef;
-                        if (finalFE != EMS_TAG_ANY)
-                            bufTags[EMSdataTag(idx)].byte = newTag.byte;
-                        if (EMSisMapped)
-                            bufTags[EMSmapTag(idx)].tags.fe = EMS_TAG_FULL;
-                        return true;
-                    }
                     default:
                         fprintf(stderr, "EMSreadUsingTags: unknown type (%d) read from memory\n", newTag.tags.type);
                         return false;
@@ -572,16 +603,23 @@ bool EMSreadUsingTags(const int mmapID,
         //}
         // CAS failed or memory wasn't in initial state, wait and retry.
         // Permit preemptive map acquisition while waiting for data.
-        if (EMSisMapped)
+        if (EMSisMapped) {
             bufTags[EMSmapTag(idx)].tags.fe = EMS_TAG_FULL;
-
-        NANOSLEEP;
-
-        if (EMSisMapped)
+        }
+        NANO_TIMEOUT_SLEEP_CATCH {
+            // printf("******** NANO_TIMEOUT_SLEEP_CATCH NANO_DID_TIMEOUT %lli \n", timer ? *timer : 0ll);
+            return false;
+        }
+        if (EMSisMapped) {
             EMStransitionFEtag(
                 &bufTags[EMSmapTag(idx)], NULL,
-                EMS_TAG_FULL, EMS_TAG_BUSY, EMS_TAG_ANY
-            );
+                EMS_TAG_FULL, EMS_TAG_BUSY, EMS_TAG_ANY,
+                timer);
+            if (NANO_DID_TIMEOUT(timer)) {
+                // printf("******** END NANO_DID_TIMEOUT %lli \n", timer ? *timer : 0ll);
+                return false;
+            }
+        }
     }
 }
 
@@ -667,16 +705,21 @@ bool EMSwriteUsingTags(int mmapID,
                        EMSvalueType *key,
                        EMSvalueType *value,
                        unsigned char initialFE, // Block until F/E tags are this value
-                       unsigned char finalFE) // Set the tag to this value when done
+                       unsigned char finalFE,// Set the tag to this value when done
+                       int64_t* timer)
 {
-    RESET_NAP_TIME()
+    NANO_SET_TIMEOUT(timer)
+
     char *emsBuf = emsBufs[mmapID];
     volatile EMStag_t *bufTags = (EMStag_t *) emsBuf;
     volatile int64_t *bufInt64 = (int64_t *) emsBuf;
     volatile double *bufDouble = (double *) emsBuf;
     char *bufChar = emsBuf;
     EMStag_t newTag, oldTag, memTag;
-    int64_t idx = EMSwriteIndexMap(mmapID, key);
+    int64_t idx = EMSwriteIndexMap(mmapID, key,
+        timer);
+    if (NANO_DID_TIMEOUT(timer))
+            return false;
     if (idx < 0) {
         fprintf(stderr, "EMSwriteUsingTags: index out of bounds\n");
         return false;
@@ -690,8 +733,10 @@ bool EMSwriteUsingTags(int mmapID,
             maptag = NULL;
         EMStransitionFEtag(
             &bufTags[EMSdataTag(idx)], maptag,
-            initialFE, EMS_TAG_BUSY, EMS_TAG_ANY
-        );
+            initialFE, EMS_TAG_BUSY, EMS_TAG_ANY,
+            timer);
+        if (NANO_DID_TIMEOUT(timer))
+            return false;
     }
     while (true)
     {
@@ -746,7 +791,8 @@ bool EMSwriteUsingTags(int mmapID,
                         // LENGTH (32bit) PREFIX ENCODE
                         int64_t byteOffset;
                         EMS_ALLOC(byteOffset, value->length + 8, bufChar,
-                                  "EMSwriteUsingTags: out of memory to store buffer", false);
+                                  "EMSwriteUsingTags: out of memory to store buffer",
+                                  false);
                         bufInt64[EMSdataData(idx)] = byteOffset;
                         uint32_t * heap_ptr = EMSheapPtr(byteOffset);
                         heap_ptr[0] = value->length;
@@ -798,7 +844,9 @@ bool EMSwriteUsingTags(int mmapID,
             // Tag was already marked BUSY, must retry
         }
         //  Failed to set the tags, sleep and retry
-        NANOSLEEP;
+        NANO_TIMEOUT_SLEEP_CATCH {
+            return false;
+        }
     }
 }
 
@@ -806,25 +854,25 @@ bool EMSwriteUsingTags(int mmapID,
 //==================================================================
 //  WriteXF
 bool EMSwriteXF(int mmapID, EMSvalueType *key, EMSvalueType *value) {
-    return EMSwriteUsingTags(mmapID, key, value, EMS_TAG_ANY, EMS_TAG_FULL);
+    return EMSwriteUsingTags(mmapID, key, value, EMS_TAG_ANY, EMS_TAG_FULL,0);
 }
 
 //==================================================================
 //  WriteXE
 bool EMSwriteXE(int mmapID, EMSvalueType *key, EMSvalueType *value) {
-    return EMSwriteUsingTags(mmapID, key, value, EMS_TAG_ANY, EMS_TAG_EMPTY);
+    return EMSwriteUsingTags(mmapID, key, value, EMS_TAG_ANY, EMS_TAG_EMPTY,0);
 }
 
 //==================================================================
 //  WriteEF
 bool EMSwriteEF(int mmapID, EMSvalueType *key, EMSvalueType *value) {
-    return EMSwriteUsingTags(mmapID, key, value, EMS_TAG_EMPTY, EMS_TAG_FULL);
+    return EMSwriteUsingTags(mmapID, key, value, EMS_TAG_EMPTY, EMS_TAG_FULL,0);
 }
 
 //==================================================================
 //  Write
 bool EMSwrite(int mmapID, EMSvalueType *key, EMSvalueType *value) {
-    return EMSwriteUsingTags(mmapID, key, value, EMS_TAG_ANY, EMS_TAG_ANY);
+    return EMSwriteUsingTags(mmapID, key, value, EMS_TAG_ANY, EMS_TAG_ANY,0);
 }
 
 
@@ -1578,3 +1626,466 @@ int __EMSinit(
  |    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.             |
  |                                                                             |
  +-----------------------------------------------------------------------------*/
+
+// !
+#define ARR_DATATAG_EMPTY EMS_TAG_FULL
+
+//==================================================================
+//  Push onto stack
+// TODO: Eventually promote return value to 64bit
+// retruns
+//      +0  :  len (top || pushed idx + 1)
+//      -1  :  timeout
+//      -2  :  err unknown type
+//      -3  :  err entry overflow
+int EMSpush(
+    int mmapID,
+    EMSvalueType *value,
+    int64_t* timer)
+{
+    void *emsBuf = emsBufs[mmapID];
+    int64_t *bufInt64 = (int64_t *) emsBuf;
+    EMStag_t *bufTags = (EMStag_t *) emsBuf;
+    char *bufChar = (char *) emsBuf;
+
+    // Wait until the stack top is FULL,
+    // then mark it BUSY while updating the stack
+    EMStransitionFEtag(
+        &bufTags[EMScbTag(EMS_ARR_STACKTOP)], NULL,
+        EMS_TAG_FULL, EMS_TAG_BUSY, EMS_TAG_ANY,
+        timer);
+    if (NANO_DID_TIMEOUT(timer))
+        return -1;
+    // TODO: BUG: Truncating the full 64b range
+    int32_t idx = bufInt64[EMScbData(EMS_ARR_STACKTOP)];
+    int32_t top = idx + 1;
+
+    if (top == bufInt64[EMScbData(EMS_ARR_NELEM)]) {
+        fprintf(stderr, "EMSpush: Ran out of stack entries\n");
+        bufTags[EMScbTag(EMS_ARR_STACKTOP)].tags.fe = EMS_TAG_FULL;
+        return -2;
+    }
+
+    //  Wait until the target memory at the top of the stack is EMPTY
+    EMStag_t newTag;
+    newTag.byte = EMStransitionFEtag(
+        &bufTags[EMSdataTag(idx)], NULL,
+        ARR_DATATAG_EMPTY, EMS_TAG_BUSY, EMS_TAG_ANY,
+        timer);
+    if (NANO_DID_TIMEOUT(timer)) {
+        bufTags[EMScbTag(EMS_ARR_STACKTOP)].tags.fe = EMS_TAG_FULL;
+        return -1;
+    }
+    newTag.tags.rw = 0;
+    newTag.tags.type = value->type;
+    newTag.tags.fe = ARR_DATATAG_EMPTY;
+    //  Write the value onto the stack
+    switch (newTag.tags.type)
+    {
+        case EMS_TYPE_UNDEFINED:
+            bufInt64[EMSdataData(idx)] = 0xdeadbeef;
+            break;
+        case EMS_TYPE_INTEGER:
+        case EMS_TYPE_BOOLEAN:
+        case EMS_TYPE_FLOAT:
+            bufInt64[EMSdataData(idx)] = (int64_t) value->value;
+            break;
+        case EMS_TYPE_STRING:
+        case EMS_TYPE_BUFFER:
+        case EMS_TYPE_JSON: {
+                int64_t offset;
+                EMS_ALLOC(offset, value->length + 8, bufChar,
+                                  "EMSpush: out of memory to store buffer\n",
+                                  -2); // TODO:
+                bufInt64[EMSdataData(idx)] = offset;
+                uint32_t * ptr = EMSheapPtr(offset);
+                ptr[0] = value->length;
+                memcpy((ptr+1),
+                    (const void *) value->value,
+                    value->length);
+                // EMS_ALLOC(byteOffset, strlen((const char *) value->value), bufChar, "EMSpush: out of memory to store buffer\n", -1); // + 1 NULL padding
+                // memcpy(EMSheapPtr(byteOffset), (const char *) value->value, value->length);
+                break;
+            }
+        // case EMS_TYPE_JSON:
+        // case EMS_TYPE_STRING:
+        //     {
+        //         int64_t textOffset;
+        //         size_t len = strlen((const char *) value->value);
+        //         EMS_ALLOC(textOffset, len + 1, bufChar, "EMSpush: out of memory to store string\n", -1);
+        //         bufInt64[EMSdataData(idx)] = textOffset;
+        //         memcpy(EMSheapPtr(textOffset), (const char *) value->value, len + 1);
+        //         break;
+        //     }
+        default:
+            fprintf(stderr, "EMSpush: Unknown value type\n");
+            top = -3;
+            goto DONE;
+    }
+
+    //  commit new top
+    bufInt64[EMScbData(EMS_ARR_STACKTOP)] = top;
+DONE:
+    //  commit & mark data FULL
+    bufTags[EMSdataTag(idx)].byte = newTag.byte;
+    //  mark stack pointer basck to FULL
+    bufTags[EMScbTag(EMS_ARR_STACKTOP)].tags.fe = EMS_TAG_FULL;
+
+    return top;
+}
+
+
+//==================================================================
+//  Pop data from stack
+//
+int EMSpop(
+    int mmapID,
+    EMSvalueType *returnValue,
+    int64_t* timer)
+{
+    void *emsBuf = emsBufs[mmapID];
+    int64_t *bufInt64 = (int64_t *) emsBuf;
+    EMStag_t *bufTags = (EMStag_t *) emsBuf;
+    char *bufChar = (char *) emsBuf;
+    EMStag_t dataTag;
+
+    returnValue->length = 0;
+    returnValue->type = EMS_TYPE_UNDEFINED;
+
+    //  Wait until the stack pointer is full and mark it empty while pop is performed
+    EMStransitionFEtag(
+        &bufTags[EMScbTag(EMS_ARR_STACKTOP)], NULL,
+        EMS_TAG_FULL, EMS_TAG_BUSY, EMS_TAG_ANY,
+        timer);
+    if (NANO_DID_TIMEOUT(timer)) {
+        // returnValue->value = (void *) 0xf00dd00f;
+        return -1;
+    }
+
+    // bufInt64[EMScbData(EMS_ARR_STACKTOP)]--;
+    // int64_t idx = bufInt64[EMScbData(EMS_ARR_STACKTOP)];
+    int64_t idx = bufInt64[EMScbData(EMS_ARR_STACKTOP)] - 1;
+
+    //  Stack is empty, return undefined
+    if (idx < 0) {
+        // bufInt64[EMScbData(EMS_ARR_STACKTOP)] = 0;
+        bufTags[EMScbTag(EMS_ARR_STACKTOP)].tags.fe = EMS_TAG_FULL;
+        // returnValue->value = (void *) 0xf00dd00f;
+        return 0;
+    }
+
+    //  Wait until the data pointed to by the stack pointer is FULL,
+    //  then mark it BUSY while it is copied,
+    //  and set it to EMPTY when finished
+    dataTag.byte = EMStransitionFEtag(
+        &bufTags[EMSdataTag(idx)], NULL,
+        EMS_TAG_FULL, EMS_TAG_BUSY, EMS_TAG_ANY,
+        timer);
+    if (NANO_DID_TIMEOUT(timer)) {
+        bufTags[EMScbTag(EMS_ARR_STACKTOP)].tags.fe = EMS_TAG_FULL;
+        // returnValue->value = (void *) 0xf00dd00f;
+        return -1;
+    }
+
+    returnValue->type = dataTag.tags.type;
+    switch (dataTag.tags.type)
+    {
+        case EMS_TYPE_UNDEFINED: {
+            // returnValue->value = (void *) 0xdeadbeef;
+            break;
+        }
+        case EMS_TYPE_BOOLEAN:
+        case EMS_TYPE_INTEGER:
+        case EMS_TYPE_FLOAT: {
+            returnValue->value = (void *) bufInt64[EMSdataData(idx)];
+            break;
+        }
+        case EMS_TYPE_STRING:
+        case EMS_TYPE_BUFFER:
+        case EMS_TYPE_JSON:  {
+            // LENGTH (32bit) PREFIX ENCODE
+            int64_t offset = bufInt64[EMSdataData(idx)];
+            const uint32_t * ptr = EMSheapPtr(offset);
+            int32_t len = ptr[0];
+            returnValue->length = len;
+            // TODO:  ... requires large preallocated returnValue
+            // returnValue->value = malloc(len + 1);  // FREE
+            // if(returnValue->value == NULL) {
+            //     fprintf(stderr, "EMSpop: Unable to allocate space to return stack top string\n");
+            //     idx = -4;
+            //     goto NAY;
+            // }
+            memcpy(returnValue->value, (ptr+1), len);
+            EMS_FREE(offset);
+            break;
+        }
+        // case EMS_TYPE_JSON:
+        // case EMS_TYPE_STRING: {
+        //     int64_t offset = bufInt64[EMSdataData(idx)];
+        //     const char * ptr = EMSheapPtr(offset);
+        //     size_t len = strlen(ptr); // TODO:
+        //     returnValue->length = len;
+        //     // TODO: ... requires large preallocated buffer on ->value
+        //     //
+        //     // returnValue->value = malloc(len + 1); // FREE
+        //     // if(returnValue->value == NULL) {
+        //     //     fprintf(stderr, "EMSpop: Unable to allocate space to return stack top string\n");
+        //     //     idx = -4;
+        //     //     goto NAY;
+        //     // }
+        //     puts("------\n");
+        //     memcpy(returnValue->value, ptr, len);
+        //     EMS_FREE(offset);
+        //     break;
+        // }
+        default:
+            fprintf(stderr, "EMSpop: ERROR - unknown top of stack data type\n");
+            idx = -3;
+            goto NAY;
+    }
+    bufTags[EMSdataTag(idx)].tags.fe = ARR_DATATAG_EMPTY;
+    bufTags[EMScbTag(EMS_ARR_STACKTOP)].tags.fe = EMS_TAG_FULL;
+    bufInt64[EMScbData(EMS_ARR_STACKTOP)] = idx;
+    return idx;
+
+NAY:
+    bufTags[EMSdataTag(idx)].tags.fe = ARR_DATATAG_EMPTY;
+    bufTags[EMScbTag(EMS_ARR_STACKTOP)].tags.fe = EMS_TAG_FULL;
+    returnValue->type = EMS_TYPE_UNDEFINED;
+    // returnValue->value = (void *) 0xf00dd00f;
+    return idx;
+
+}
+
+
+//==================================================================
+//  Enqueue data
+//  Heap top and bottom are monotonically increasing, but the index
+//  returned is a circular buffer.
+// TODO: Eventually promote return value to 64bit
+int EMSenqueue(
+    int mmapID,
+    EMSvalueType *value,
+    int64_t* timer)
+{
+
+    void *emsBuf = emsBufs[mmapID];
+    int64_t *bufInt64 = (int64_t *) emsBuf;
+    EMStag_t *bufTags = (EMStag_t *) emsBuf;
+    char *bufChar = (char *) emsBuf;
+
+    //  Wait until heap top is FULL
+    //  mark BUSY while data is enqueued
+    EMStransitionFEtag(
+        &bufTags[EMScbTag(EMS_ARR_STACKTOP)], NULL,
+        EMS_TAG_FULL, EMS_TAG_BUSY, EMS_TAG_ANY,
+        timer);
+    if (NANO_DID_TIMEOUT(timer)) {
+        return -1;
+    }
+
+    // TODO: BUG  This could be truncated
+    int32_t cap = bufInt64[EMScbData(EMS_ARR_NELEM)];
+    int32_t top = bufInt64[EMScbData(EMS_ARR_STACKTOP)];
+    int32_t bot = bufInt64[EMScbData(EMS_ARR_Q_BOTTOM)];
+    int32_t idx = top % cap;
+    ++top;
+    int32_t len = top - bot;
+    if ( len > cap ) {
+        fprintf(stderr, "EMSenqueue: Ran out of stack entries\n");
+        bufTags[EMScbTag(EMS_ARR_STACKTOP)].tags.fe = EMS_TAG_FULL;
+        return -2;
+    }
+
+    //  Wait for data pointed to by heap top to be empty,
+    //  then set to Full while it is filled
+    EMStag_t newTag;
+    newTag.byte = EMStransitionFEtag(
+        &bufTags[EMSdataTag(idx)], NULL,
+        ARR_DATATAG_EMPTY, EMS_TAG_BUSY, EMS_TAG_ANY,
+        timer);
+    if (NANO_DID_TIMEOUT(timer)) {
+        bufTags[EMScbTag(EMS_ARR_STACKTOP)].tags.fe = EMS_TAG_FULL;
+        return -1;
+    }
+    newTag.tags.rw = 0;
+    newTag.tags.type = value->type;
+    newTag.tags.fe = ARR_DATATAG_EMPTY;
+    // bufTags[EMSdataTag(idx)].tags.rw = 0;
+    // bufTags[EMSdataTag(idx)].tags.type = value->type;
+    switch (newTag.tags.type) {
+        case EMS_TYPE_UNDEFINED:
+            bufInt64[EMSdataData(idx)] = 0xdeadbeef;
+            break;
+        case EMS_TYPE_BOOLEAN:
+        case EMS_TYPE_INTEGER:
+        case EMS_TYPE_FLOAT:
+            bufInt64[EMSdataData(idx)] = (int64_t) value->value;
+            break;
+        case EMS_TYPE_STRING:
+        case EMS_TYPE_BUFFER:
+        case EMS_TYPE_JSON: {
+            int64_t offset;
+                EMS_ALLOC(offset, value->length + 8, bufChar,
+                                  "EMSpush: out of memory to store buffer\n",
+                                  -2); // TODO:
+                bufInt64[EMSdataData(idx)] = offset;
+                uint32_t * ptr = EMSheapPtr(offset);
+                ptr[0] = value->length;
+                memcpy((ptr+1),
+                    (const void *) value->value,
+                    value->length);
+                // EMS_ALLOC(byteOffset, strlen((const char *) value->value), bufChar, "EMSpush: out of memory to store buffer\n", -1); // + 1 NULL padding
+                // memcpy(EMSheapPtr(byteOffset), (const char *) value->value, value->length);
+                break;
+        }
+        // case EMS_TYPE_JSON:
+        // case EMS_TYPE_STRING: {
+        //     int64_t textOffset;
+        //     size_t len = value->length;
+        //     EMS_ALLOC(textOffset, len + 1, bufChar, "EMSpush: out of memory to store string\n", -1);
+        //     bufInt64[EMSdataData(idx)] = textOffset;
+        //     memcpy(EMSheapPtr(textOffset), (const char *) value->value, len + 1);
+        //     break;
+        // }
+        default:
+            fprintf(stderr, "EMSenqueue: Unknown value type\n");
+            len = -3;
+            goto RETURN;
+    }
+
+    // commit new top
+    bufInt64[EMScbData(EMS_ARR_STACKTOP)] = top;
+
+RETURN:
+    //  mark stack data FULL
+    bufTags[EMSdataTag(idx)].byte = newTag.byte;
+    //  Enqueue is complete, set the tag on the heap to to FULL
+    bufTags[EMScbTag(EMS_ARR_STACKTOP)].tags.fe = EMS_TAG_FULL;
+    return len;
+}
+
+
+//==================================================================
+//  Dequeue
+int EMSdequeue(
+    int mmapID,
+    EMSvalueType *returnValue,
+    int64_t* timer)
+{
+    void *emsBuf = emsBufs[mmapID];
+    int64_t *bufInt64 = (int64_t *) emsBuf;
+    EMStag_t *bufTags = (EMStag_t *) emsBuf;
+    char *bufChar = (char *) emsBuf;
+    EMStag_t dataTag;
+
+    returnValue->length = 0;
+    returnValue->type = EMS_TYPE_UNDEFINED;
+
+    //  wait for bottom of heap pointer FULL
+    //  mark it BUSY while data is dequeued
+    EMStransitionFEtag(
+        &bufTags[EMScbTag(EMS_ARR_Q_BOTTOM)], NULL,
+        EMS_TAG_FULL, EMS_TAG_BUSY, EMS_TAG_ANY,
+        timer);
+    if (NANO_DID_TIMEOUT(timer)) {
+        // returnValue->value = (void *) 0xf00dd00f;
+        return -1;
+    }
+
+    // TODO:
+    int32_t bot = bufInt64[EMScbData(EMS_ARR_Q_BOTTOM)];
+    int32_t idx = bot % bufInt64[EMScbData(EMS_ARR_NELEM)];
+    int32_t top = bufInt64[EMScbData(EMS_ARR_STACKTOP)];
+
+    //  If Queue is empty, return undefined
+    if (bot >= top) {
+        bufInt64[EMScbData(EMS_ARR_Q_BOTTOM)] = bot;
+        bufTags[EMScbTag(EMS_ARR_Q_BOTTOM)].tags.fe = EMS_TAG_FULL;
+        // returnValue->value = (void *) 0xf00dd00f;
+        return 0;
+    }
+
+    ++bot;
+    int32_t len = top - bot;
+
+    //  Wait for data pointed to heap bot FULL
+    //  mark BUSY while copying it
+    //  mark EMPTY when done
+    dataTag.byte = EMStransitionFEtag(
+        &bufTags[EMSdataTag(idx)], NULL,
+        EMS_TAG_FULL, EMS_TAG_BUSY, EMS_TAG_ANY,
+        timer);
+    if (NANO_DID_TIMEOUT(timer)) {
+        bufTags[EMScbTag(EMS_ARR_Q_BOTTOM)].tags.fe = EMS_TAG_FULL;
+        // returnValue->value = (void *) 0xf00dd00f;
+        return -1;
+    }
+
+    dataTag.tags.fe = EMS_TAG_FULL;
+    returnValue->type = dataTag.tags.type;
+    switch (dataTag.tags.type)
+    {
+        case EMS_TYPE_UNDEFINED: {
+            // returnValue->value = (void *) 0xdeadbeef;
+            break;
+        }
+        case EMS_TYPE_BOOLEAN:
+        case EMS_TYPE_INTEGER:
+        case EMS_TYPE_FLOAT: {
+            returnValue->value = (void *) bufInt64[EMSdataData(idx)];
+            break;
+        }
+        case EMS_TYPE_STRING:
+        case EMS_TYPE_BUFFER:
+        case EMS_TYPE_JSON: {
+            // LENGTH (32bit) PREFIX ENCODE
+            int64_t offset = bufInt64[EMSdataData(idx)];
+            const uint32_t * ptr = EMSheapPtr(offset);
+            int32_t len = ptr[0];
+            returnValue->length = len;
+            // TODO:  ... requires large preallocated returnValue
+            // returnValue->value = malloc(len + 1);  // FREE
+            // if(returnValue->value == NULL) {
+            //     fprintf(stderr, "EMSdequeue: Unable to allocate space to return stack top string\n");
+            //     idx = -4;
+            //     goto NAY;
+            // }
+            memcpy(returnValue->value, (ptr+1), len);
+            EMS_FREE(offset);
+            break;
+        }
+        // case EMS_TYPE_JSON:
+        // case EMS_TYPE_STRING: {
+        //     int64_t offset = bufInt64[EMSdataData(idx)];
+        //     const char * ptr = EMSheapPtr(offset);
+        //     size_t len = strlen(ptr); // TODO:
+        //     returnValue->length = len;
+        //     returnValue->value = malloc(len + 1); // FREE
+        //     if(returnValue->value == NULL) {
+        //         fprintf(stderr, "EMSpop: Unable to allocate space to return stack top string\n");
+        //         idx = -4;
+        //         goto NAY;
+        //     }
+        //     memcpy(returnValue->value, ptr, len + 1);
+        //     EMS_FREE(offset);
+        //     break;
+        // }
+        default:
+            fprintf(stderr, "EMSdequeue: ERROR - unknown type at head of queue\n");
+            len = -3;
+            goto NAY;
+    }
+
+    bufTags[EMSdataTag(idx)].byte = dataTag.byte;
+    bufTags[EMScbTag(EMS_ARR_Q_BOTTOM)].tags.fe = EMS_TAG_FULL;
+    bufInt64[EMScbData(EMS_ARR_Q_BOTTOM)] = bot;
+    return len;
+
+NAY:
+    bufTags[EMSdataTag(idx)].byte = dataTag.byte;
+    bufTags[EMScbTag(EMS_ARR_Q_BOTTOM)].tags.fe = EMS_TAG_FULL;
+    returnValue->type = EMS_TYPE_UNDEFINED;
+    // returnValue->value = (void *) 0xf00dd00f;
+    return len;
+}

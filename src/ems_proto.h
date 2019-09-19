@@ -33,7 +33,7 @@
 
 // ---------------------------------------------------------------------------------
 //  Non-exposed API functions
-int64_t EMSwriteIndexMap(const int mmapID, EMSvalueType *key);
+int64_t EMSwriteIndexMap(const int mmapID, EMSvalueType *key, int64_t * timer);
 int64_t EMSkey2index(void *emsBuf, EMSvalueType *key, bool is_mapped);
 int64_t EMShashString(const char *key);
 
@@ -48,13 +48,18 @@ bool EMScas(int mmapID, EMSvalueType *key,
             EMSvalueType *oldValue, EMSvalueType *newValue,
             EMSvalueType *returnValue);
 bool EMSfaa(int mmapID, EMSvalueType *key, EMSvalueType *value, EMSvalueType *returnValue);
-int EMSpush(int mmapID, EMSvalueType *value);
-bool EMSpop(int mmapID, EMSvalueType *returnValue);
-int EMSenqueue(int mmapID, EMSvalueType *value);
-bool EMSdequeue(int mmapID, EMSvalueType *returnValue);
 bool EMSloopInit(int mmapID, int32_t start, int32_t end, int32_t minChunk, int schedule_mode);
 bool EMSloopChunk(int mmapID, int32_t *start, int32_t *end);
-unsigned char EMStransitionFEtag(EMStag_t volatile *tag, EMStag_t volatile *mapTag, unsigned char oldFE, unsigned char newFE, unsigned char oldType);
+
+unsigned char EMStransitionFEtag(
+    EMStag_t volatile *tag, EMStag_t volatile *mapTag,
+    unsigned char oldFE, unsigned char newFE, unsigned char oldType,
+    int64_t* timer);
+
+int EMSpush(int mmapID, EMSvalueType *value, int64_t* timer);
+int EMSpop(int mmapID, EMSvalueType *returnValue, int64_t* timer);
+int EMSenqueue(int mmapID, EMSvalueType *value, int64_t* timer);
+int EMSdequeue(int mmapID, EMSvalueType *returnValue, int64_t* timer);
 bool EMSreadRW(const int mmapID, EMSvalueType *key, EMSvalueType *returnValue);
 bool EMSreadFF(const int mmapID, EMSvalueType *key, EMSvalueType *returnValue);
 bool EMSreadFE(const int mmapID, EMSvalueType *key, EMSvalueType *returnValue);

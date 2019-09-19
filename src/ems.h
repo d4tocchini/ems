@@ -216,33 +216,35 @@ extern char    emsBufFilenames[EMS_MAX_N_BUFS][MAX_FNAME_LEN];
 
 #define TIME_ms_to_ns(x) ( ((x)<<10) - ((x)<<5) + ((x)<<3) )
 
+#define MAX_NAP_TIME  524288L // .5 (sec) == 1 << 19 (ns)
+
 #define RESET_NAP_TIME() \
-  int ems_nano_sleep_total = 0;\
+  int64_t * ems_nano_timeout_p = NULL;\
   int EMScurrentNapTime = 16; // 1 // D4
 
-#define MAX_NAP_TIME  524288L // .5 (sec) == 1 << 19 (ns)
+#define NANO_SET_TIMEOUT(timeout)\
+  int64_t * ems_nano_timeout_p = timeout;\
+  int EMScurrentNapTime = 16; // 1 // D4
 
 #define NANOSLEEP    {\
     struct timespec     sleep_time;\
     sleep_time.tv_sec  = 0;\
     sleep_time.tv_nsec = EMScurrentNapTime;\
     nanosleep(&sleep_time, NULL);\
-    ems_nano_sleep_total += EMScurrentNapTime;\
     EMScurrentNapTime <<= 1;\
     if(EMScurrentNapTime > MAX_NAP_TIME) {\
         EMScurrentNapTime = MAX_NAP_TIME;\
     }\
  }
 
- #define WHILE_NANOTIME(max_ms) \
-    int64_t ems_nano_sleep_max = max_ms;\
-    ems_nano_sleep_max = TIME_ms_to_ns( ems_nano_sleep_max );\
-    while ( ems_nano_sleep_max == 0 || ((ems_nano_sleep_max) - ems_nano_sleep_total) >= 0)
+#define NANO_TIMEOUT_SLEEP_CATCH \
+    if (ems_nano_timeout_p == NULL ||\
+       (*ems_nano_timeout_p -= EMScurrentNapTime) > 0)\
+    { NANOSLEEP }\
+    else
 
-#define NANO_TIMEIN(name)    do {\
-    RESET_NAP_TIME()\
-    int ems_timeout_lapse_#name = 0;\
- } while(0)
+#define NANO_DID_TIMEOUT(timer_p) \
+    ((timer_p != NULL) && (*timer_p < 0))
 
 
 #define EMS_ALLOC(addr, len, bufChar, errmsg, retval)                    \

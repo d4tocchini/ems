@@ -40,9 +40,13 @@ bool EMSfaa(
     EMSvalueType *value,
     EMSvalueType *returnValue)
 {
+    // TODO:
+    int64_t * timer = NULL;
+
     void *emsBuf = emsBufs[mmapID];
     volatile EMStag_t *bufTags = (EMStag_t *) emsBuf;
-    int64_t idx = EMSwriteIndexMap(mmapID, key);
+    int64_t idx = EMSwriteIndexMap(mmapID, key,
+        timer);
     volatile int64_t *bufInt64 = (int64_t *) emsBuf;
     volatile double *bufDouble = (double *) emsBuf;
     char *bufChar = (char *) emsBuf;
@@ -57,8 +61,10 @@ bool EMSfaa(
     if (EMSisMapped) { maptag = &bufTags[EMSmapTag(idx)]; }
     else             { maptag = NULL; }
     // Wait until the data is FULL, mark it busy while FAA is performed
-    oldTag.byte = EMStransitionFEtag(&bufTags[EMSdataTag(idx)], maptag,
-                                     EMS_TAG_FULL, EMS_TAG_BUSY, EMS_TAG_ANY);
+    oldTag.byte = EMStransitionFEtag(
+        &bufTags[EMSdataTag(idx)], maptag,
+        EMS_TAG_FULL, EMS_TAG_BUSY, EMS_TAG_ANY,
+        NULL); // TODO:
 
     oldTag.tags.fe = EMS_TAG_FULL;  // When written back, mark FULL
     switch (oldTag.tags.type) {
@@ -303,9 +309,15 @@ bool EMSfaa(
 
 //==================================================================
 //  Atomic Compare and Swap
-bool EMScas(int mmapID, EMSvalueType *key,
-            EMSvalueType *oldValue, EMSvalueType *newValue,
-            EMSvalueType *returnValue) {
+bool EMScas(
+    int mmapID,
+    EMSvalueType *key,
+    EMSvalueType *oldValue, EMSvalueType *newValue,
+    EMSvalueType *returnValue)
+{
+    // TODO:
+    int64_t * timer = NULL;
+
     void *emsBuf = emsBufs[mmapID];
     volatile int64_t *bufInt64 = (int64_t *) emsBuf;
     int64_t idx = EMSkey2index(emsBuf, key, EMSisMapped);
@@ -331,8 +343,11 @@ retry_on_undefined:
         if (EMSisMapped) { maptag = &bufTags[EMSmapTag(idx)]; }
         else             { maptag = NULL; }
         // Wait until the data is FULL, mark it busy while FAA is performed
-        EMStransitionFEtag(&bufTags[EMSdataTag(idx)], maptag,
-                           EMS_TAG_FULL, EMS_TAG_BUSY, EMS_TAG_ANY);
+        EMStransitionFEtag(
+            &bufTags[EMSdataTag(idx)], maptag,
+            EMS_TAG_FULL, EMS_TAG_BUSY, EMS_TAG_ANY,
+            timer); // TODO:
+
         memType = bufTags[EMSdataTag(idx)].tags.type;
     }
 
@@ -379,7 +394,8 @@ retry_on_undefined:
         //  Allocate on Write: If this memory was undefined (ie: unallocated),
         //  allocate the index map, store the undefined, and start over again.
         if(EMSisMapped  &&  idx < 0) {
-            idx = EMSwriteIndexMap(mmapID, key);
+            idx = EMSwriteIndexMap(mmapID, key,
+                timer);
             if (idx < 0) {
                 fprintf(stderr, "EMScas: Not able to allocate map on CAS of undefined data\n");
                 return false;
