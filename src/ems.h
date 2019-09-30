@@ -39,20 +39,19 @@
 #include <sys/mman.h>
 #include <math.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <unistd.h>
 #include <errno.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 
-#include <stdbool.h> 
+#include <stdbool.h>
 
 #if !defined _GNU_SOURCE
 #  define _GNU_SOURCE
 #endif
 #include <sched.h>
-
-#include "ems_alloc.h"
 
 //==================================================================
 // EMS init flags
@@ -206,10 +205,11 @@ extern char    emsBufFilenames[EMS_MAX_N_BUFS][MAX_FNAME_LEN];
 #define EMSmapTag(idx)      ( EMSappTag2emsTag((idx) + EMS_ARR_CB_SIZE + bufInt64[EMScbData(EMS_ARR_NELEM)]) )
 #define EMSheapPtr(idx)     ( &bufChar[ bufInt64[EMScbData(EMS_ARR_HEAPBOT)] + (idx) ] )
 
-#define EMS_MEM_MALLOCBOT(bufChar) ((struct emsMem *) &bufChar[ bufInt64[EMScbData(EMS_ARR_MALLOCBOT)] ])
+
 
 
 //==================================================================
+//  Sleep/Timeout
 //  Yield the processor and sleep (using exponential decay) without
 //  using resources/
 //  Used within spin-loops to reduce hot-spotting
@@ -247,25 +247,66 @@ extern char    emsBufFilenames[EMS_MAX_N_BUFS][MAX_FNAME_LEN];
     ((timer_p != NULL) && (*timer_p < 0))
 
 
-#define EMS_ALLOC(addr, len, bufChar, errmsg, retval)                    \
-  addr = emsMutexMem_alloc( EMS_MEM_MALLOCBOT(bufChar), \
-                (size_t) len, (char*) &bufInt64[EMScbData(EMS_ARR_MEM_MUTEX)] ); \
-  if(addr < 0)  { \
-      fprintf(stderr, "%s:%d (%s)  ERROR: EMS memory allocation of len(%zx) failed: %s\n", \
-              __FILE__, __LINE__, __FUNCTION__, len, errmsg); \
-      return retval; \
-  }
 
-#define EMS_FREE(addr) \
-  emsMutexMem_free( EMS_MEM_MALLOCBOT(bufChar), \
-            (size_t) addr, (char*) &bufInt64[EMScbData(EMS_ARR_MEM_MUTEX)] )
+//==================================================================
+// EMS alloc
+//
+// The block size used by the memory allocator for allocating heap space.
+// May be any positive non-zero value
+#define         EMS_MEM_BLOCKSZ     32
+#define         EMS_MEM_BLOCKSZ_P2  5
 
-size_t emsMutexMem_alloc(struct emsMem *heap,   // Base of EMS malloc structs
-                         size_t len,    // Number of bytes to allocate
-                         volatile char *mutex);  // Pointer to the mem allocator's mutex
-void emsMutexMem_free(struct emsMem *heap,  // Base of EMS malloc structs
-                      size_t addr,  // Offset of alloc'd block in EMS memory
-                      volatile char *mutex); // Pointer to the mem allocator's mutex
+//  Buddy allocator control structure
+struct emsMem
+{
+    int32_t         level;
+    uint8_t         tree[1];
+};
+
+struct emsMem*  emsMem_new(int level);
+void            emsMem_delete(struct emsMem *);
+size_t          emsMem_alloc(struct emsMem *, size_t bytesRequested);
+void            ems_free(struct emsMem *, size_t offset);
+size_t          emsMem_size(struct emsMem *, size_t offset);
+void            emsMem_dump(struct emsMem *);
+size_t          emsNextPow2(int64_t x);
+size_t          emsMutexMem_alloc(
+                    struct emsMem *heap,  // Base of EMS malloc structs
+                    size_t len,  // Number of bytes to allocate
+                    volatile char *mutex); // Pointer to mem allocator's mutex
+void            emsMutexMem_free(
+                    struct emsMem *heap, // Base of EMS malloc structs
+                    size_t addr, // Offset of alloc'd block in EMS memory
+                    volatile char *mutex); // Pointer to mem allocator's mutex
+
+#define         EMS_MEM_MALLOCBOT(bufChar) \
+                    ((struct emsMem *) &bufChar[ bufInt64[ EMScbData(EMS_ARR_MALLOCBOT)] ])
+
+#define         EMS_ALLOC(addr, len, bufChar, errmsg, retval) \
+                    addr = emsMutexMem_alloc(\
+                        EMS_MEM_MALLOCBOT(bufChar),\
+                        len,\
+                        (char*) &bufInt64[EMScbData(EMS_ARR_MEM_MUTEX)]);\
+                    if (addr < 0)  {\
+                        fprintf(stderr,\
+                            "%s:%d (%s) ERROR: EMS memory allocation of len(%zx) failed: %s\n",\
+                            __FILE__, __LINE__, __FUNCTION__, len, errmsg);\
+                        return retval;\
+                    }
+
+#define         EMS_FREE(addr) \
+                    emsMutexMem_free(\
+                        EMS_MEM_MALLOCBOT(bufChar), \
+                        addr,\
+                        (char*) &bufInt64[EMScbData(EMS_ARR_MEM_MUTEX)] )
+
+
+
+
+
+
+
+
 
 extern int EMSmyID;   // EMS Thread ID
 
@@ -273,6 +314,134 @@ extern int EMSmyID;   // EMS Thread ID
   ( (bufInt64[EMScbData(EMS_ARR_MAPBOT)] << EMSwordSize_pow2) \
   != bufInt64[EMScbData(EMS_ARR_MALLOCBOT)] )
 
-#include "ems_proto.h"
+
+
+
+
+
+
+// --------------------------------------------------------------------------------
+//  EMS Types
+
+// Bitfields of a Tag Byte
+#define     EMS_TYPE_NBITS_FE    2
+#define     EMS_TYPE_NBITS_TYPE  3
+#define     EMS_TYPE_NBITS_RW    3
+#define     EMS_RW_NREADERS_MAX  ((1 << EMS_TYPE_NBITS_RW) - 1)
+typedef union 
+{
+            struct
+            {
+                unsigned char fe   : EMS_TYPE_NBITS_FE;
+                unsigned char type : EMS_TYPE_NBITS_TYPE;
+                unsigned char rw   : EMS_TYPE_NBITS_RW;
+            }   tags;
+            unsigned char byte;
+}           EMStag_t;
+
+#define     EMS_VALUE_TYPE_INITIALIZER \
+                {\
+                    .length = 0,\
+                    .value = NULL,\
+                    .type = EMS_TYPE_INVALID\
+                }
+
+
+// Type-punning is now a warning in GCC, but this syntax is still okay
+typedef union
+{
+                double d;
+                uint64_t u64;
+}           EMSulong_double;
+
+
+// Internal EMS representation of a JSON value
+typedef struct
+{
+                size_t length;  // Defined only for JSON and strings
+                void *value;
+                unsigned char type;
+}           EMSvalueType;
+
+// --------------------------------------------------------------------------------
+//  Non-exposed API functions
+int64_t EMSwriteIndexMap(const int mmapID, EMSvalueType *key, int64_t * timer);
+int64_t EMSkey2index(void *emsBuf, EMSvalueType *key, bool is_mapped);
+int64_t EMShashString(const char *key, int32_t len);
+
+
+// ---------------------------------------------------------------------------------
+//  External API functions
+int     EMScriticalEnter(int mmapID, int timeout);
+bool    EMScriticalExit(int mmapID);
+int     EMSbarrier(int mmapID, int timeout);
+bool    EMSsingleTask(int mmapID);
+bool    EMScas(int mmapID,
+            EMSvalueType *key,
+            EMSvalueType *oldValue, EMSvalueType *newValue,
+            EMSvalueType *returnValue);
+bool    EMSfaa(int mmapID,
+            EMSvalueType *key,
+            EMSvalueType *value,
+            EMSvalueType *returnValue);
+bool    EMSloopInit(int mmapID,
+            int32_t start,
+            int32_t end,
+            int32_t minChunk,
+            int schedule_mode);
+bool    EMSloopChunk(int mmapID,
+            int32_t *start,
+            int32_t *end);
+unsigned char EMStransitionFEtag(
+            EMStag_t volatile *tag,
+            EMStag_t volatile *mapTag,
+            unsigned char oldFE,
+            unsigned char newFE,
+            unsigned char oldType,
+            int64_t* timer);
+
+int EMSpush(int mmapID, EMSvalueType *value, int64_t* timer);
+int EMSpop(int mmapID, EMSvalueType *returnValue, int64_t* timer);
+int EMSenqueue(int mmapID, EMSvalueType *value, int64_t* timer);
+int EMSdequeue(int mmapID, EMSvalueType *returnValue, int64_t* timer);
+bool EMSreadRW(const int mmapID, EMSvalueType *key, EMSvalueType *returnValue);
+bool EMSreadFF(const int mmapID, EMSvalueType *key, EMSvalueType *returnValue);
+bool EMSreadFE(const int mmapID, EMSvalueType *key, EMSvalueType *returnValue);
+bool EMSread(const int mmapID, EMSvalueType *key, EMSvalueType *returnValue);
+int EMSreleaseRW(const int mmapID, EMSvalueType *key);
+bool EMSwriteXF(int mmapID, EMSvalueType *key, EMSvalueType *value);
+bool EMSwriteXE(int mmapID, EMSvalueType *key, EMSvalueType *value);
+bool EMSwriteEF(int mmapID, EMSvalueType *key, EMSvalueType *value);
+bool EMSwrite(int mmapID, EMSvalueType *key, EMSvalueType *value);
+bool EMSsetTag(int mmapID, EMSvalueType *key, bool is_full);
+bool EMSdestroy(int mmapID, bool do_unlink);
+bool EMSindex2key(int mmapID, int64_t idx, EMSvalueType *key);
+bool EMSsync(int mmapID);
+int EMSinitialize(int64_t nElements,     // 0
+                  size_t heapSize,        // 1
+                  bool useMap,            // 2
+                  const char *filename,   // 3
+                  bool persist,           // 4
+                  bool useExisting,       // 5
+                  bool doDataFill,        // 6
+                  bool fillIsJSON,        // 7
+                  EMSvalueType *fillValue, // 8
+                  bool doSetFEtags,       // 9
+                  bool setFEtagsFull,     // 10
+                  int EMSmyID,            // 11
+                  bool pinThreads,        // 12
+                  int32_t nThreads,       // 13
+                  int32_t pctMLock );     // 14
+
+int ems_open(const char *filename);
+int ems_create(
+    int64_t nElements,     // 0
+    size_t heapSize,      // 1
+    const char *filename,  // 2
+    int thread_id,        // 3
+    int32_t nThreads,      // 4
+    int32_t flags,          // 5
+    EMSvalueType *fillValue// 6
+);
 
 #endif //EMSPROJ_EMS_H

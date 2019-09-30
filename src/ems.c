@@ -16,9 +16,41 @@ char    emsBufFilenames[EMS_MAX_N_BUFS][MAX_FNAME_LEN] = { { 0 } };
 //
 //  Returns the byte offset in the EMS data space of the space allocated
 //
-size_t emsMutexMem_alloc(struct emsMem *heap,   // Base of EMS malloc structs
-                         size_t len,            // Number of bytes to allocate
-                         volatile char *mutex)  // Pointer to the mem allocator's mutex
+
+// #define         EMS_ALLOC(addr, len, bufChar, errmsg, retval) \
+//                     addr = emsMutexMem_alloc(\
+//                         EMS_MEM_MALLOCBOT(bufChar),\
+//                         len,\
+//                         (char*) &bufInt64[EMScbData(EMS_ARR_MEM_MUTEX)]);\
+
+// ((struct emsMem *) &bufChar[ bufInt64[ EMScbData(EMS_ARR_MALLOCBOT)] ])
+
+
+#define _ems_malloc(len) \
+    emsMutexMem_alloc(\
+        &bufChar[bufInt64[EMScbData(EMS_ARR_MALLOCBOT)]],\
+        len,\
+        &bufInt64[EMScbData(EMS_ARR_MEM_MUTEX)])
+
+#define EMS_MALLOC_ERR(len, errmsg) \
+    fprintf(stderr,\
+        "%s:%d (%s) ERROR: EMS memory allocation of len(%zx) failed: %s\n",\
+        __FILE__, __LINE__, __FUNCTION__, len, errmsg);
+
+
+size_t ems_malloc(
+    const int id,
+    size_t len)
+{
+    volatile char *bufChar = emsBufs[id];
+    volatile int64_t *bufInt64 = bufChar;
+    return _ems_malloc(len);
+}
+
+size_t emsMutexMem_alloc(
+    struct emsMem *heap,   // Base of EMS malloc structs
+    size_t len,            // Number of bytes to allocate
+    volatile char *mutex)  // Pointer to the mem allocator's mutex
 {
     RESET_NAP_TIME()
     // Wait until we acquire the allocator's mutex
@@ -26,10 +58,9 @@ size_t emsMutexMem_alloc(struct emsMem *heap,   // Base of EMS malloc structs
         NANOSLEEP;
 
     size_t retval = emsMem_alloc(heap, len);
-    *mutex = EMS_TAG_EMPTY;    // Unlock the allocator's mutex
+    *mutex = EMS_TAG_EMPTY; // Unlock the allocator's mutex
     return (retval);
 }
-
 
 void emsMutexMem_free(struct emsMem *heap,  // Base of EMS malloc structs
                       size_t addr,          // Offset of alloc'd block in EMS memory
@@ -40,7 +71,7 @@ void emsMutexMem_free(struct emsMem *heap,  // Base of EMS malloc structs
     while (!__sync_bool_compare_and_swap(mutex, EMS_TAG_EMPTY, EMS_TAG_FULL))
         NANOSLEEP;
 
-    emsMem_free(heap, addr);
+    ems_free(heap, addr);
     *mutex = EMS_TAG_EMPTY;   // Unlock the allocator's mutex
 }
 
@@ -67,7 +98,9 @@ int64_t ems_key2hash(EMSvalueType *key)
             idx = llabs((int64_t) key->value);
             break;
         case EMS_TYPE_STRING:
-            idx = EMShashString((char *) key->value);
+        case EMS_TYPE_BUFFER:
+        case EMS_TYPE_JSON:
+            idx = EMShashString(key->value, key->length);
             break;
         case EMS_TYPE_UNDEFINED:
             fprintf(stderr, "EMS ERROR: ems_key2hash keyType is defined as Undefined\n");
@@ -121,17 +154,31 @@ int64_t ems_map_hash2index(void *emsBuf, EMSvalueType *key, int64_t idx, int64_t
                         matched = true;
                 }
                     break;
-                case EMS_TYPE_STRING: {
-                    int64_t keyStrOffset = bufInt64[EMSmapData(idx)];
-                    if (strcmp(
-                            (const char *) key->value,
-                            EMSheapPtr(keyStrOffset)
-                        ) == 0)
+                case EMS_TYPE_STRING:
+                case EMS_TYPE_BUFFER:
+                case EMS_TYPE_JSON: {
+                    int64_t offset = bufInt64[EMSmapData(idx)];
+                    uint32_t * ptr = EMSheapPtr(offset);
+                    size_t length = ptr[0];
+                    if ((length == key->length) &&
+                        memcmp(key->value, (ptr+1), length) == 0)
                     {
                         matched = true;
                     }
-                }
                     break;
+                }
+                // case EMS_TYPE_STRING: {
+                //     int64_t offset = bufInt64[EMSmapData(idx)];
+                //     uint32_t * ptr = EMSheapPtr(offset);
+                //     if (strcmp(
+                //             (const char *) key->value,
+                //             ptr
+                //         ) == 0)
+                //     {
+                //         matched = true;
+                //     }
+                // }
+                    // break;
                 case EMS_TYPE_UNDEFINED:
                     // Nothing hashed to this map index yet, so the key does not exist
                     notPresent = true;
@@ -266,11 +313,11 @@ unsigned char EMStransitionFEtag(
 //==================================================================
 //  Hash a string into an integer
 //
-int64_t EMShashString(const char *key) {
+int64_t EMShashString(const char *key, int32_t len) {
     // TODO BUG MAGIC Max key length
     int charN = 0;
     uint64_t hash = 0;
-    while (key[charN] != 0) {
+    while (charN < len) {
         hash = key[charN] + (hash << 6) + (hash << 16) - hash;
         charN++;
     }
@@ -359,12 +406,23 @@ int64_t EMSwriteIndexMap(const int mmapID, EMSvalueType *key, int64_t * timer)
                         }
                     }
                         break;
-                    case EMS_TYPE_STRING: {
-                        int64_t keyStrOffset = bufInt64[EMSmapData(idx)];
-                        if (strcmp((const char *) key->value, (const char *) EMSheapPtr(keyStrOffset)) == 0) {
+                    case EMS_TYPE_STRING:
+                    case EMS_TYPE_BUFFER:
+                    case EMS_TYPE_JSON: {
+                        int64_t offset = bufInt64[EMSmapData(idx)];
+                        uint32_t * ptr = EMSheapPtr(offset);
+                        size_t length = ptr[0];
+                        if ((length == key->length) &&
+                            memcmp(key->value, (ptr+1), length) == 0)
+                        {
                             matched = true;
                             bufTags[EMSmapTag(idx)].tags.fe = EMS_TAG_FULL;
                         }
+                        // int64_t keyStrOffset = bufInt64[EMSmapData(idx)];
+                        // if (strcmp((const char *) key->value, (const char *) EMSheapPtr(keyStrOffset)) == 0) {
+                        //     matched = true;
+                        //     bufTags[EMSmapTag(idx)].tags.fe = EMS_TAG_FULL;
+                        // }
                     }
                         break;
                     case EMS_TYPE_UNDEFINED:
@@ -384,12 +442,25 @@ int64_t EMSwriteIndexMap(const int mmapID, EMSvalueType *key, int64_t * timer)
                                 bufDouble[EMSmapData(idx)] = alias.d;
                             }
                                 break;
-                            case EMS_TYPE_STRING: {
-                                int64_t textOffset;
-                                EMS_ALLOC(textOffset, key->length + 1, bufChar,
-                                          "EMSwriteIndexMap(string): out of memory to store string", -1);
-                                bufInt64[EMSmapData(idx)] = textOffset;
-                                strcpy((char *) EMSheapPtr(textOffset), (const char *) key->value);
+                            case EMS_TYPE_STRING:
+                            case EMS_TYPE_BUFFER:
+                            case EMS_TYPE_JSON: {
+                                int64_t offset = _ems_malloc(key->length + 8);
+                                if (offset < 0) {
+                                    EMS_MALLOC_ERR(key->length + 8, "EMSwriteIndexMap(string): out of memory to store string")
+                                    return -1;
+                                }
+                                bufInt64[EMSmapData(idx)] = offset;
+                                uint32_t * heap_ptr = EMSheapPtr(offset);
+                                heap_ptr[0] = key->length;
+                                memcpy((heap_ptr+1), key->value, key->length);
+                                // int64_t textOffset = _ems_malloc(key->length + 1);
+                                // if (textOffset < 0) {
+                                //     EMS_MALLOC_ERR(key->length + 1, "EMSwriteIndexMap(string): out of memory to store string")
+                                //     return -1;
+                                // }
+                                // bufInt64[EMSmapData(idx)] = textOffset;
+                                // strcpy((char *) EMSheapPtr(textOffset), (const char *) key->value);
                             }
                                 break;
                             case EMS_TYPE_UNDEFINED:
@@ -571,7 +642,9 @@ bool EMSreadUsingTags(const int mmapID,
                             bufTags[EMSmapTag(idx)].tags.fe = EMS_TAG_FULL;
                         return true;
                     }
-                    case EMS_TYPE_BUFFER: {
+                    case EMS_TYPE_STRING:
+                    case EMS_TYPE_BUFFER:
+                    case EMS_TYPE_JSON: {
                         uint32_t * heap_ptr = EMSheapPtr(bufInt64[EMSdataData(idx)]);
                         returnValue->length = heap_ptr[0];
                         returnValue->value = (void *)(heap_ptr + 1);
@@ -581,16 +654,16 @@ bool EMSreadUsingTags(const int mmapID,
                             bufTags[EMSmapTag(idx)].tags.fe = EMS_TAG_FULL;
                         return true;
                     }
-                    case EMS_TYPE_JSON:
-                    case EMS_TYPE_STRING: {
-                        returnValue->value = (void *) EMSheapPtr(bufInt64[EMSdataData(idx)]);
-                        returnValue->length = strlen((const char *)returnValue->value); // TODO:
-                        if (finalFE != EMS_TAG_ANY)
-                            bufTags[EMSdataTag(idx)].byte = newTag.byte;
-                        if (EMSisMapped)
-                            bufTags[EMSmapTag(idx)].tags.fe = EMS_TAG_FULL;
-                        return true;
-                    }
+                    // case EMS_TYPE_JSON:
+                    // case EMS_TYPE_STRING: {
+                    //     returnValue->value = (void *) EMSheapPtr(bufInt64[EMSdataData(idx)]);
+                    //     returnValue->length = strlen((const char *)returnValue->value); // TODO:
+                    //     if (finalFE != EMS_TAG_ANY)
+                    //         bufTags[EMSdataTag(idx)].byte = newTag.byte;
+                    //     if (EMSisMapped)
+                    //         bufTags[EMSmapTag(idx)].tags.fe = EMS_TAG_FULL;
+                    //     return true;
+                    // }
                     default:
                         fprintf(stderr, "EMSreadUsingTags: unknown type (%d) read from memory\n", newTag.tags.type);
                         return false;
@@ -787,29 +860,31 @@ bool EMSwriteUsingTags(int mmapID,
                         bufDouble[EMSdataData(idx)] = alias.d;
                     }
                         break;
-                    case EMS_TYPE_BUFFER: {
+                    case EMS_TYPE_STRING:
+                    case EMS_TYPE_BUFFER:
+                    case EMS_TYPE_JSON: {
                         // LENGTH (32bit) PREFIX ENCODE
-                        int64_t byteOffset;
-                        EMS_ALLOC(byteOffset, value->length + 8, bufChar,
-                                  "EMSwriteUsingTags: out of memory to store buffer",
-                                  false);
-                        bufInt64[EMSdataData(idx)] = byteOffset;
-                        uint32_t * heap_ptr = EMSheapPtr(byteOffset);
+                        int64_t offset = _ems_malloc(value->length + 8);
+                        if (offset < 0) {
+                            EMS_MALLOC_ERR(value->length + 8, "EMSwriteUsingTags: out of memory to store buffer")
+                            return false;
+                        }
+                        bufInt64[EMSdataData(idx)] = offset;
+                        uint32_t * heap_ptr = EMSheapPtr(offset);
                         heap_ptr[0] = value->length;
-                        memcpy((heap_ptr+1),
-                            (const void *) value->value,
-                            value->length
-                        );
+                        memcpy((heap_ptr+1), value->value, value->length);
                         break;
                     }
-                    case EMS_TYPE_JSON:
-                    case EMS_TYPE_STRING: {
-                        int64_t textOffset;
-                        EMS_ALLOC(textOffset, value->length + 1, bufChar,  // NULL padding at end
-                                  "EMSwriteUsingTags: out of memory to store string", false);
-                        bufInt64[EMSdataData(idx)] = textOffset;
-                        strcpy(EMSheapPtr(textOffset), (const char *) value->value);
-                    }
+                    // case EMS_TYPE_JSON:
+                    // case EMS_TYPE_STRING: {
+                    //     int64_t textOffset = _ems_malloc(value->length + 1);
+                    //     if (textOffset < 0) {
+                    //         EMS_MALLOC_ERR(value->length + 8, "EMSwriteUsingTags: out of memory to store string")
+                    //         return false;
+                    //     }
+                    //     bufInt64[EMSdataData(idx)] = textOffset;
+                    //     strcpy(EMSheapPtr(textOffset), (const char *) value->value);
+                    // }
                         break;
                     default:
                         fprintf(stderr, "EMSwriteUsingTags: Unknown arg type\n");
@@ -954,9 +1029,12 @@ bool EMSindex2key(int mmapID, int64_t idx, EMSvalueType *key) {
             return true;
         }
         case EMS_TYPE_BUFFER:
-        case EMS_TYPE_JSON:
-        case EMS_TYPE_STRING: {
-            key->value = (void *)(EMSheapPtr(bufInt64[EMSmapData(idx)]));
+        case EMS_TYPE_STRING:
+        case EMS_TYPE_JSON: {
+            uint32_t * heap_ptr = EMSheapPtr(bufInt64[EMSmapData(idx)]);
+            key->length = heap_ptr[0];
+            key->value = heap_ptr + 1;
+            // key->value = (void *)(EMSheapPtr(bufInt64[EMSmapData(idx)]));
             return true;
         }
         case EMS_TYPE_UNDEFINED: {
@@ -1139,7 +1217,7 @@ char * _ems_mmap(const char *filename, size_t filesize, int flags) {
     int fd = open(filename,
         O_APPEND | O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
     if (fd < 0) {
-        perror("Error opening shared memory file -- Possibly need to be root?");
+        perror("Error opening ems memory file -- Possibly need to be root?");
         return -1;
     }
     if (flags & 1) {
@@ -1162,8 +1240,20 @@ char * _ems_mmap(const char *filename, size_t filesize, int flags) {
     return emsBuf;
 }
 
+int ems_index_of_file(
+    const char *filename)
+{
+    int idx = 0;
+    while(idx < EMS_MAX_N_BUFS  &&  emsBufs[idx] != NULL) {
+        if (0==strncmp(emsBufFilenames[idx], filename, MAX_FNAME_LEN))
+            return idx;
+        idx++;
+    }
+    return -1;
+}
+
 static inline
-int _ems_alloc(const char *filename, size_t filesize, char *buf) {
+int _ems_register(const char *filename, size_t filesize, char *buf) {
     int ems_id = 0;
     while(ems_id < EMS_MAX_N_BUFS  &&  emsBufs[ems_id] != NULL)
         ems_id++;
@@ -1178,7 +1268,7 @@ int _ems_alloc(const char *filename, size_t filesize, char *buf) {
     return ems_id;
 }
 
- #define _EMS_useMap (flags & EMS_USE_MAP)
+ #define _EMS_useMap ((bool)(flags & EMS_USE_MAP))
 #define _EMS_persist (flags & EMS_PERSIST)
 #define _EMS_doDataFill (flags & EMS_FILL)
 #define _EMS_fillIsJSON (flags & EMS_FILL_JSON)
@@ -1187,13 +1277,19 @@ int _ems_alloc(const char *filename, size_t filesize, char *buf) {
 #define _EMS_pinThreads (flags & EMS_PIN_THREADS)
 #define _EMS_pctMLock (flags & EMS_MLOCK_PCT_MASK)
 
+
 int ems_open(
         const char *filename)
 {
+    int idx = ems_index_of_file(filename);
+    // printf("idx=%i\n",idx);
+    // TODO:
+    if (idx > -1)
+        return idx;
     size_t filesize = ems_await_owner(filename);
     char *buf = _ems_mmap(filename, filesize, 0);
-    int ems_id = _ems_alloc(filename, filesize, buf);
-    return ems_id;
+    idx = _ems_register(filename, filesize, buf);
+    return idx;
 }
 
 int ems_create(
@@ -1205,6 +1301,13 @@ int ems_create(
     int32_t flags,          // 5
     EMSvalueType *fillValue// 6
 ) {
+
+    // TODO: temp patch for renderer process reuse...
+    int idx = ems_index_of_file(filename);
+    if (idx > -1) {
+        return idx;
+    }
+
     bool useExisting = (flags & EMS_CLEAR) == 0;
     int EMSmyID = thread_id;
     bool doClear = !useExisting && EMSmyID == 0
@@ -1222,30 +1325,23 @@ int ems_create(
     //     ems_await_owner(filename);
     // }
 
-
-
     size_t nMemBlocks = (heapSize >> EMS_MEM_BLOCKSZ_P2) + 1;
     size_t nMemBlocksPow2 = emsNextPow2((int64_t) nMemBlocks);
     int32_t nMemLevels = __builtin_ctzl(nMemBlocksPow2);
-    size_t bottomOfMalloc;
-    size_t filesize;
-
     size_t bottomOfMap = (size_t)EMSdataTagWord(nElements)
         + (size_t)EMSwordSize;
         // Map begins 1 word AFTER the last tag word of data
 
-    bottomOfMalloc = bottomOfMap
-        + (_EMS_useMap
-            ? bottomOfMap : 0)
-    ;
+    size_t bottomOfMalloc = bottomOfMap + (bottomOfMap*(_EMS_useMap|0));
+
     size_t bottomOfHeap = bottomOfMalloc
         + sizeof(struct emsMem)
         + ((nMemBlocksPow2 << 1) - 2);
 
+    size_t filesize;
     if (nElements <= 0)
         filesize = (EMS_CB_LOCKS + nThreads) // EMS Control Block
-            * sizeof(int)
-        ;
+            * sizeof(int);
     else
         filesize = bottomOfHeap
             + (nMemBlocksPow2 << EMS_MEM_BLOCKSZ_P2);
@@ -1316,7 +1412,7 @@ int ems_create(
     }
     #endif
 
-    int ems_id = _ems_alloc(filename, filesize, emsBuf);
+    int ems_id = _ems_register(filename, filesize, emsBuf);
     if (ems_id < 0)
         return -1;
 
@@ -1693,16 +1789,15 @@ int EMSpush(
         case EMS_TYPE_STRING:
         case EMS_TYPE_BUFFER:
         case EMS_TYPE_JSON: {
-                int64_t offset;
-                EMS_ALLOC(offset, value->length + 8, bufChar,
-                                  "EMSpush: out of memory to store buffer\n",
-                                  -2); // TODO:
+                int64_t offset = _ems_malloc(value->length + 8);
+                if (offset < 0) {
+                    EMS_MALLOC_ERR(value->length + 8, "EMSpush: out of memory to store buffer\n")
+                    return -2; // TODO:
+                }
                 bufInt64[EMSdataData(idx)] = offset;
                 uint32_t * ptr = EMSheapPtr(offset);
                 ptr[0] = value->length;
-                memcpy((ptr+1),
-                    (const void *) value->value,
-                    value->length);
+                memcpy((ptr+1), value->value, value->length);
                 // EMS_ALLOC(byteOffset, strlen((const char *) value->value), bufChar, "EMSpush: out of memory to store buffer\n", -1); // + 1 NULL padding
                 // memcpy(EMSheapPtr(byteOffset), (const char *) value->value, value->length);
                 break;
@@ -1925,19 +2020,18 @@ int EMSenqueue(
         case EMS_TYPE_STRING:
         case EMS_TYPE_BUFFER:
         case EMS_TYPE_JSON: {
-            int64_t offset;
-                EMS_ALLOC(offset, value->length + 8, bufChar,
-                                  "EMSpush: out of memory to store buffer\n",
-                                  -2); // TODO:
-                bufInt64[EMSdataData(idx)] = offset;
-                uint32_t * ptr = EMSheapPtr(offset);
-                ptr[0] = value->length;
-                memcpy((ptr+1),
-                    (const void *) value->value,
-                    value->length);
-                // EMS_ALLOC(byteOffset, strlen((const char *) value->value), bufChar, "EMSpush: out of memory to store buffer\n", -1); // + 1 NULL padding
-                // memcpy(EMSheapPtr(byteOffset), (const char *) value->value, value->length);
-                break;
+            int64_t offset = _ems_malloc(value->length + 8);
+            if (offset < 0) {
+                EMS_MALLOC_ERR(value->length + 8, "EMSenqueue: out of memory to store buffer\n")
+                return -2; // TODO:
+            }
+            bufInt64[EMSdataData(idx)] = offset;
+            uint32_t * ptr = EMSheapPtr(offset);
+            ptr[0] = value->length;
+            memcpy((ptr+1), (const void *) value->value, value->length);
+            // EMS_ALLOC(byteOffset, strlen((const char *) value->value), bufChar, "EMSpush: out of memory to store buffer\n", -1); // + 1 NULL padding
+            // memcpy(EMSheapPtr(byteOffset), (const char *) value->value, value->length);
+            break;
         }
         // case EMS_TYPE_JSON:
         // case EMS_TYPE_STRING: {

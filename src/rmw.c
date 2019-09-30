@@ -207,8 +207,7 @@ bool EMSfaa(
             return true;
         } //  End of: float + _______
 
-        case EMS_TYPE_STRING: {
-            // size_t oldStrLen = (size_t) emsMem_size(EMS_MEM_MALLOCBOT(bufChar), bufInt64[EMSdataData(idx)]);
+        case EMS_TYPE_STRING: {            
             size_t oldStrLen = strlen(EMSheapPtr(bufInt64[EMSdataData(idx)]));
             returnValue->type = EMS_TYPE_STRING;
             returnValue->value = malloc(oldStrLen + 1);  // freed in NodeJSfaa

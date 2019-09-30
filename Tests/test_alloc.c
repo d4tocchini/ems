@@ -52,7 +52,7 @@ test_alloc(struct emsMem *b, int64_t sz) {
 static void
 test_free(struct emsMem *b, int64_t addr) {
   printf("free %lld\n",addr);
-  emsMem_free(b,addr);
+  ems_free(b,addr);
   // emsMem_dump(b);
 }
 

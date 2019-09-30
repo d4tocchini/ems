@@ -117,3 +117,61 @@ int EMSbarrier(int mmapID, int timeout) {
 
     return timeout;
 }
+
+
+
+//==================================================================
+//  Parallel Loop -- context initialization
+//
+bool EMSloopInit(int mmapID, int32_t start, int32_t end, int32_t minChunk, int schedule_mode) {
+    void *emsBuf = emsBufs[mmapID];
+    int32_t *bufInt32 = (int32_t *) emsBuf;
+    bool success = true;
+
+    bufInt32[EMS_LOOP_IDX] = start;
+    bufInt32[EMS_LOOP_START] = start;
+    bufInt32[EMS_LOOP_END] = end;
+    switch (schedule_mode) {
+        case EMS_SCHED_GUIDED:
+            bufInt32[EMS_LOOP_CHUNKSZ] = ((end - start) / 2) / bufInt32[EMS_CB_NTHREADS];
+            if (bufInt32[EMS_LOOP_CHUNKSZ] < minChunk) bufInt32[EMS_LOOP_CHUNKSZ] = minChunk;
+            bufInt32[EMS_LOOP_MINCHUNK] = minChunk;
+            bufInt32[EMS_LOOP_SCHED] = EMS_SCHED_GUIDED;
+            break;
+        case EMS_SCHED_DYNAMIC:
+            bufInt32[EMS_LOOP_CHUNKSZ] = 1;
+            bufInt32[EMS_LOOP_MINCHUNK] = 1;
+            bufInt32[EMS_LOOP_SCHED] = EMS_SCHED_DYNAMIC;
+            break;
+        default:
+            fprintf(stderr, "NodeJSloopInit: Unknown schedule modes\n");
+            success = false;
+    }
+    return success;
+}
+
+
+//==================================================================
+//  Determine the current block of iterations to assign to an
+//  an idle thread
+//  JQM TODO BUG  -- convert to 64 bit using  fe tags
+//
+bool EMSloopChunk(int mmapID, int32_t *start, int32_t *end) {
+    void *emsBuf = emsBufs[mmapID];
+    int32_t *bufInt32 = (int32_t *) emsBuf;
+
+    int chunkSize = bufInt32[EMS_LOOP_CHUNKSZ];
+    *start = __sync_fetch_and_add(&(bufInt32[EMS_LOOP_IDX]), chunkSize);
+    *end = *start + chunkSize;
+
+    if (*start > bufInt32[EMS_LOOP_END]) *end = 0;
+    if (*end > bufInt32[EMS_LOOP_END]) *end = bufInt32[EMS_LOOP_END];
+    if (bufInt32[EMS_LOOP_SCHED] == EMS_SCHED_GUIDED) {
+        //  Compute the size of the chunk the next thread should use
+        int newSz = (int) ((bufInt32[EMS_LOOP_END] - *start) / 2) / bufInt32[EMS_CB_NTHREADS];
+        if (newSz < bufInt32[EMS_LOOP_MINCHUNK]) newSz = bufInt32[EMS_LOOP_MINCHUNK];
+        bufInt32[EMS_LOOP_CHUNKSZ] = newSz;
+    }
+
+    return true;
+}
