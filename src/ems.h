@@ -253,8 +253,8 @@ extern char    emsBufFilenames[EMS_MAX_N_BUFS][MAX_FNAME_LEN];
 //
 // The block size used by the memory allocator for allocating heap space.
 // May be any positive non-zero value
-#define         EMS_MEM_BLOCKSZ     32
-#define         EMS_MEM_BLOCKSZ_P2  5
+#define         EMS_MEM_BLOCKSZ     64
+#define         EMS_MEM_BLOCKSZ_P2  6
 
 //  Buddy allocator control structure
 struct emsMem
@@ -367,7 +367,7 @@ typedef struct
 //  Non-exposed API functions
 int64_t EMSwriteIndexMap(const int mmapID, EMSvalueType *key, int64_t * timer);
 int64_t EMSkey2index(void *emsBuf, EMSvalueType *key, bool is_mapped);
-int64_t EMShashString(const char *key, int32_t len);
+int64_t EMShashString(const void *key, int32_t len);
 
 
 // ---------------------------------------------------------------------------------
@@ -414,7 +414,7 @@ bool EMSwriteXE(int mmapID, EMSvalueType *key, EMSvalueType *value);
 bool EMSwriteEF(int mmapID, EMSvalueType *key, EMSvalueType *value);
 bool EMSwrite(int mmapID, EMSvalueType *key, EMSvalueType *value);
 bool EMSsetTag(int mmapID, EMSvalueType *key, bool is_full);
-bool EMSdestroy(int mmapID, bool do_unlink);
+bool ems_destroy(int mmapID, bool do_unlink);
 bool EMSindex2key(int mmapID, int64_t idx, EMSvalueType *key);
 bool EMSsync(int mmapID);
 int EMSinitialize(int64_t nElements,     // 0
@@ -435,13 +435,10 @@ int EMSinitialize(int64_t nElements,     // 0
 
 int ems_open(const char *filename);
 int ems_create(
-    int64_t nElements,     // 0
-    size_t heapSize,      // 1
-    const char *filename,  // 2
-    int thread_id,        // 3
-    int32_t nThreads,      // 4
-    int32_t flags,          // 5
-    EMSvalueType *fillValue// 6
+    int64_t nElements,    
+    size_t heapSize,
+    const char *filename,
+    int32_t flags
 );
 
 #endif //EMSPROJ_EMS_H

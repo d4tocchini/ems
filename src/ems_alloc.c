@@ -1,3 +1,4 @@
+
 /*-----------------------------------------------------------------------------+
  |  Extended Memory Semantics (EMS)                            Version 1.3.0   |
  |  Synthetic Semantics       http://www.synsem.com/       mogill@synsem.com   |
@@ -118,7 +119,7 @@ size_t emsMem_alloc(struct emsMem *self, size_t bytesRequested) {
                 self->tree[index] = BUDDY_USED;
                 _ems_mark_parent(self, index);
                 return (
-                    ((size_t)_ems_index_offset(index, level, self->level))
+                    (_ems_index_offset(index, level, self->level))
                     << EMS_MEM_BLOCKSZ_P2
                 );
             }

@@ -622,7 +622,7 @@ class EMSarray(object):
         global myID, libems, EMSmmapID, _regionN, pinThreads, domainName, inParallelContext, tasks, nThreads
         barrier()
         if myID == 0:
-            libems.EMSdestroy(self.mmapID, unlink_file)
+            libems.ems_destroy(self.mmapID, unlink_file)
         barrier()
 
     def _returnData(self, emsval):
